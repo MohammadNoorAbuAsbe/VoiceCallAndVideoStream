@@ -1,27 +1,57 @@
-﻿//  Configuration 
-const STUN_CONFIG = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
-};
-const ICE_GATHER_TIMEOUT_MS = 12_000; // max wait for ICE gathering
+﻿// ─────────────────────────────────────────────────────────────────────────────
+//  VoiceCall — PeerJS-based, auto-signaling, no copy/paste required
+//
+//  How it works:
+//    • Each user has a persistent Peer ID stored in localStorage.
+//    • They share their ID with a friend once (like a phone number).
+//    • After that, calling is one click — PeerJS handles the SDP exchange
+//      automatically through its free signaling relay (0.peerjs.com).
+//    • Audio travels P2P (WebRTC), not through the relay.
+// ─────────────────────────────────────────────────────────────────────────────
 
-//  State 
-let pc          = null;   // RTCPeerConnection
-let localStream = null;   // MediaStream from getUserMedia
-let isMuted     = false;
-let callTimerID = null;
-let callSeconds = 0;
+// ─── Storage keys ────────────────────────────────────────────────────────────
+const KEY_ID       = 'vcall_peer_id';
+const KEY_CONTACTS = 'vcall_contacts';   // JSON: [{id, name, lastCall}]
 
-//  UI helpers 
+// ─── State ───────────────────────────────────────────────────────────────────
+let peer          = null;   // PeerJS Peer instance
+let activeCall    = null;   // PeerJS MediaConnection
+let localStream   = null;   // MediaStream from getUserMedia
+let isMuted       = false;
+let callTimerID   = null;
+let callSeconds   = 0;
+let callTimeout   = null;   // auto-cancel timer for unanswered outgoing calls
+
+// ─── Contact Book (localStorage) ─────────────────────────────────────────────
+function loadContacts() {
+  try { return JSON.parse(localStorage.getItem(KEY_CONTACTS) || '[]'); }
+  catch { return []; }
+}
+function saveContacts(list) {
+  localStorage.setItem(KEY_CONTACTS, JSON.stringify(list));
+}
+function addOrUpdateContact(name, id) {
+  const list = loadContacts().filter(c => c.id !== id);
+  list.unshift({ id, name, lastCall: null });
+  saveContacts(list);
+}
+function removeContact(id) {
+  saveContacts(loadContacts().filter(c => c.id !== id));
+}
+function touchLastCall(id) {
+  const list = loadContacts();
+  const c = list.find(c => c.id === id);
+  if (c) { c.lastCall = Date.now(); saveContacts(list); }
+}
+function getContactName(id) {
+  const c = loadContacts().find(c => c.id === id);
+  return c ? c.name : id.slice(0, 10) + '…';
+}
+
+// ─── UI helpers ──────────────────────────────────────────────────────────────
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
-}
-
-function showHide(id, visible) {
-  document.getElementById(id).classList.toggle('hidden', !visible);
 }
 
 let toastTimer = null;
@@ -33,85 +63,121 @@ function showToast(msg, isError = false) {
   toastTimer = setTimeout(() => { t.className = 'toast'; }, isError ? 8000 : 2500);
 }
 
-// Strip chat-app formatting that breaks SDP parsing:
-//  - Discord/Telegram/WhatsApp code blocks (``` ... ``` or `...`)
-//  - Windows CRLF / old Mac CR line endings → LF
-//  - Any blank lines interspersed by copy/paste
-//  - Ensure a trailing newline (required by SDP spec parsers)
-function sanitizeSdp(raw) {
-  let s = raw.trim();
-  // Remove surrounding ``` code fences (Discord, Telegram, etc.)
-  s = s.replace(/^```[\w]*\n?/i, '').replace(/```\s*$/i, '');
-  // Remove single backtick wrapping
-  s = s.replace(/^`/, '').replace(/`$/, '');
-  // Normalize line endings to \n
-  s = s.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  // SDP lines must not be blank — remove any empty lines that snuck in
-  s = s.split('\n').filter(l => l.trim() !== '').join('\n');
-  // Ensure trailing newline
-  if (!s.endsWith('\n')) s += '\n';
-  return s;
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-//  ICE gathering wait 
-function waitForIceComplete(peerConn) {
-  return new Promise((resolve) => {
-    if (peerConn.iceGatheringState === 'complete') {
-      resolve(peerConn.localDescription);
+function relativeTime(ts) {
+  const diff = Date.now() - ts;
+  if (diff < 60_000)     return 'just now';
+  if (diff < 3_600_000)  return Math.floor(diff / 60_000)   + 'm ago';
+  if (diff < 86_400_000) return Math.floor(diff / 3_600_000) + 'h ago';
+  return new Date(ts).toLocaleDateString();
+}
+
+// ─── Contacts list render ─────────────────────────────────────────────────────
+function renderContacts() {
+  const list = loadContacts();
+  const el   = document.getElementById('contacts-list');
+
+  if (list.length === 0) {
+    el.innerHTML = `
+      <div class="contacts-empty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+          <circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>
+        <p>No contacts yet.</p>
+        <p class="contacts-empty-sub">Click <strong>+ Add Contact</strong> and paste your friend's Peer ID.</p>
+      </div>`;
+    return;
+  }
+
+  el.innerHTML = list.map(c => `
+    <div class="contact-row" data-id="${escHtml(c.id)}">
+      <div class="contact-avatar">${escHtml(c.name[0].toUpperCase())}</div>
+      <div class="contact-info">
+        <span class="contact-name">${escHtml(c.name)}</span>
+        <span class="contact-sub">${c.lastCall ? relativeTime(c.lastCall) : 'Never called'}</span>
+      </div>
+      <div class="contact-actions">
+        <button class="btn btn-primary btn-sm btn-call"
+                data-id="${escHtml(c.id)}"
+                data-name="${escHtml(c.name)}">Call</button>
+        <button class="btn btn-ghost btn-sm btn-del"
+                data-id="${escHtml(c.id)}" title="Remove contact">&#10005;</button>
+      </div>
+    </div>`).join('');
+
+  el.querySelectorAll('.btn-call').forEach(btn =>
+    btn.addEventListener('click', () => startCall(btn.dataset.id, btn.dataset.name)));
+
+  el.querySelectorAll('.btn-del').forEach(btn =>
+    btn.addEventListener('click', () => {
+      removeContact(btn.dataset.id);
+      renderContacts();
+    }));
+}
+
+// ─── PeerJS initialization ───────────────────────────────────────────────────
+function initPeer() {
+  const savedId = localStorage.getItem(KEY_ID) || undefined;
+  peer = new Peer(savedId, {
+    // PeerJS free cloud server — only used for the initial handshake (~2 KB/call)
+    // Audio travels directly P2P after that.
+    config: {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ]
+    }
+  });
+
+  peer.on('open', (id) => {
+    localStorage.setItem(KEY_ID, id);
+    const el = document.getElementById('my-peer-id');
+    el.textContent = id;
+    el.title = id;
+  });
+
+  // Someone is calling us
+  peer.on('call', (incomingCall) => {
+    // If already in a call, decline gracefully
+    if (activeCall) {
+      incomingCall.close();
       return;
     }
-    const timer = setTimeout(() => {
-      peerConn.removeEventListener('icegatheringstatechange', handler);
-      resolve(peerConn.localDescription); // use best we have so far
-    }, ICE_GATHER_TIMEOUT_MS);
+    activeCall = incomingCall;
+    const callerName = getContactName(incomingCall.peer);
+    document.getElementById('incoming-caller-name').textContent = callerName;
+    showScreen('screen-incoming');
+  });
 
-    function handler() {
-      if (peerConn.iceGatheringState === 'complete') {
-        clearTimeout(timer);
-        peerConn.removeEventListener('icegatheringstatechange', handler);
-        resolve(peerConn.localDescription);
-      }
-    }
-    peerConn.addEventListener('icegatheringstatechange', handler);
+  peer.on('error', (err) => {
+    const msg = err.type === 'peer-unavailable'
+      ? 'Friend is offline or ID is wrong.'
+      : 'Network error: ' + (err.message || err.type);
+    showToast(msg, true);
+    cleanup();
+    renderContacts();
+    showScreen('screen-idle');
+  });
+
+  peer.on('disconnected', () => {
+    // Auto-reconnect to signaling server (needed to keep receiving calls)
+    setTimeout(() => { if (peer && !peer.destroyed) peer.reconnect(); }, 2000);
   });
 }
 
-//  Create RTCPeerConnection 
-function createPC() {
-  const conn = new RTCPeerConnection(STUN_CONFIG);
-
-  conn.ontrack = (event) => {
-    const audio = document.getElementById('remote-audio');
-    if (event.streams && event.streams[0]) {
-      audio.srcObject = event.streams[0];
-    }
-  };
-
-  conn.onconnectionstatechange = () => {
-    const s = conn.connectionState;
-    if (s === 'connected') {
-      startCallTimer();
-      showScreen('screen-incall');
-    } else if (s === 'failed') {
-      showToast(
-        'Connection failed  your network may use strict NAT.\nTry again or ask your friend to host instead.',
-        true
-      );
-    } else if (s === 'disconnected') {
-      showToast('Connection lost. Hanging up...', true);
-      setTimeout(hangUp, 2000);
-    }
-  };
-
-  return conn;
-}
-
-//  Mic error handler 
+// ─── Mic error handler ───────────────────────────────────────────────────────
 function handleMicError(e) {
   if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
     showToast(
       'Microphone access denied.\n' +
-      'Fix: Windows Settings  Privacy  Microphone  enable "Allow desktop apps".',
+      'Fix: Windows Settings → Privacy → Microphone → enable for this app.',
       true
     );
   } else if (e.name === 'NotFoundError') {
@@ -121,20 +187,7 @@ function handleMicError(e) {
   }
 }
 
-//  Copy to clipboard 
-async function copyField(fieldId) {
-  const el  = document.getElementById(fieldId);
-  const btn = document.querySelector(`[data-copy="${fieldId}"]`);
-  try {
-    await navigator.clipboard.writeText(el.value);
-    if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy'; }, 2000); }
-  } catch {
-    el.select();
-    document.execCommand('copy');
-  }
-}
-
-//  Call timer 
+// ─── Call timer ──────────────────────────────────────────────────────────────
 function startCallTimer() {
   callSeconds = 0;
   clearInterval(callTimerID);
@@ -145,165 +198,203 @@ function startCallTimer() {
     document.getElementById('call-timer').textContent = m + ':' + s;
   }, 1000);
 }
+function stopCallTimer() { clearInterval(callTimerID); callTimerID = null; }
 
-function stopCallTimer() {
-  clearInterval(callTimerID);
-  callTimerID = null;
-}
-
-//  Clean up 
+// ─── Cleanup ─────────────────────────────────────────────────────────────────
 function cleanup() {
   stopCallTimer();
-  if (pc) { pc.close(); pc = null; }
+  clearTimeout(callTimeout); callTimeout = null;
+  if (activeCall)  { activeCall.close();  activeCall  = null; }
   if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
-  const audio = document.getElementById('remote-audio');
-  audio.srcObject = null;
-  isMuted = false;
-  callSeconds = 0;
+  document.getElementById('remote-audio').srcObject = null;
+  document.getElementById('call-timer').textContent = '00:00';
+  isMuted      = false;
+  callSeconds  = 0;
+  // Reset mute button state
+  document.getElementById('icon-mic')?.classList.remove('hidden');
+  document.getElementById('icon-mic-off')?.classList.add('hidden');
+  document.getElementById('btn-mute')?.classList.remove('muted');
+  const lbl = document.querySelector('#btn-mute + .btn-circle-label, #btn-mute ~ span');
+  if (lbl) lbl.textContent = 'Mute';
 }
 
-// 
-// CALLER FLOW
-// 
+// ─── Attach handlers to an active call (outgoing OR incoming) ─────────────────
+function attachCallHandlers(call, peerName) {
+  call.on('stream', (remoteStream) => {
+    clearTimeout(callTimeout); callTimeout = null;
+    document.getElementById('remote-audio').srcObject = remoteStream;
+    document.getElementById('incall-peer-name').textContent = peerName;
+    touchLastCall(call.peer);
+    renderContacts();
+    startCallTimer();
+    showScreen('screen-incall');
+  });
 
-async function startCall() {
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-  } catch (e) {
-    handleMicError(e);
-    return;
-  }
-
-  showScreen('screen-caller');
-  showHide('caller-gathering', true);
-  showHide('caller-share', true);
-
-  pc = createPC();
-  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  const desc = await waitForIceComplete(pc);
-
-  document.getElementById('offer-sdp').value = desc.sdp;
-  showHide('caller-gathering', false);
-  showHide('caller-share', false);
-  // re-show share panel (it was hidden initially)
-  document.getElementById('caller-share').classList.remove('hidden');
-}
-
-async function connectCaller() {
-  const raw = document.getElementById('answer-sdp-input').value;
-  if (!raw.trim()) { showToast("Paste your friend's response code first.", true); return; }
-
-  const sdp = sanitizeSdp(raw);
-  try {
-    await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp }));
-    // onconnectionstatechange will fire 'connected' and switch screen automatically
-  } catch (e) {
-    showToast('Invalid response code — ' + (e.message || String(e)), true);
-  }
-}
-
-// 
-// CALLEE FLOW
-// 
-
-function joinCall() {
-  showScreen('screen-callee');
-  showHide('callee-paste', false);
-  showHide('callee-share', true);
-  // reset to step 1
-  document.getElementById('callee-paste').classList.remove('hidden');
-  document.getElementById('callee-share').classList.add('hidden');
-  document.getElementById('offer-sdp-input').value = '';
-}
-
-async function generateAnswer() {
-  const raw = document.getElementById('offer-sdp-input').value.trim();
-  if (!raw) { showToast("Paste your friend's invite code first.", true); return; }
-
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-  } catch (e) {
-    handleMicError(e);
-    return;
-  }
-
-  showHide('callee-paste', true);
-  document.getElementById('callee-paste').classList.add('hidden');
-  document.getElementById('callee-share').classList.remove('hidden');
-  showHide('callee-gathering-hint', false);
-  showHide('callee-share-ready', true);
-  document.getElementById('callee-gathering-hint').classList.remove('hidden');
-  document.getElementById('callee-share-ready').classList.add('hidden');
-
-  pc = createPC();
-  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-
-  const sdp = sanitizeSdp(raw);
-  try {
-    await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-  } catch (e) {
-    showToast('Invalid invite code — ' + (e.message || String(e)), true);
+  call.on('close', () => {
+    const wasConnected = document.getElementById('screen-incall').classList.contains('active');
     cleanup();
-    showScreen('screen-callee');
-    document.getElementById('callee-paste').classList.remove('hidden');
-    document.getElementById('callee-share').classList.add('hidden');
+    renderContacts();
+    showScreen('screen-idle');
+    if (wasConnected) showToast('Call ended.');
+  });
+
+  call.on('error', (err) => {
+    cleanup();
+    renderContacts();
+    showScreen('screen-idle');
+    showToast('Call error: ' + (err.message || String(err)), true);
+  });
+}
+
+// ─── Outgoing call ───────────────────────────────────────────────────────────
+async function startCall(peerId, peerName) {
+  if (!peer || peer.disconnected) {
+    showToast('Reconnecting to network…', true);
+    peer.reconnect();
     return;
   }
 
-  const desc = await waitForIceComplete(pc);
-  document.getElementById('answer-sdp').value = desc.sdp;
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch (e) {
+    handleMicError(e);
+    return;
+  }
 
-  document.getElementById('callee-gathering-hint').classList.add('hidden');
-  document.getElementById('callee-share-ready').classList.remove('hidden');
+  document.getElementById('calling-peer-name').textContent = peerName;
+  // Avatar initial
+  const avatar = document.getElementById('calling-avatar');
+  if (avatar) avatar.textContent = peerName[0]?.toUpperCase() || '?';
+  showScreen('screen-calling');
+
+  const call = peer.call(peerId, localStream);
+  activeCall  = call;
+
+  // Auto-cancel if no answer in 40 seconds
+  callTimeout = setTimeout(() => {
+    showToast('No answer.', true);
+    cleanup();
+    renderContacts();
+    showScreen('screen-idle');
+  }, 40_000);
+
+  attachCallHandlers(call, peerName);
 }
 
-// 
-// IN-CALL CONTROLS
-// 
+// ─── Accept incoming call ────────────────────────────────────────────────────
+async function acceptCall() {
+  if (!activeCall) return;
+  const call     = activeCall;
+  const peerName = document.getElementById('incoming-caller-name').textContent;
 
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch (e) {
+    handleMicError(e);
+    call.close();
+    activeCall = null;
+    showScreen('screen-idle');
+    return;
+  }
+
+  call.answer(localStream);
+  attachCallHandlers(call, peerName);
+}
+
+// ─── Reject / cancel ─────────────────────────────────────────────────────────
+function rejectCall() {
+  if (activeCall) { activeCall.close(); activeCall = null; }
+  cleanup();
+  showScreen('screen-idle');
+}
+
+function cancelCall() {
+  cleanup();
+  showScreen('screen-idle');
+}
+
+// ─── In-call: mute ───────────────────────────────────────────────────────────
 function toggleMute() {
   if (!localStream) return;
   isMuted = !isMuted;
   localStream.getAudioTracks().forEach(t => { t.enabled = !isMuted; });
-
   document.getElementById('icon-mic').classList.toggle('hidden', isMuted);
   document.getElementById('icon-mic-off').classList.toggle('hidden', !isMuted);
-  const lbl = document.querySelector('#btn-mute span');
-  if (lbl) lbl.textContent = isMuted ? 'Unmute' : 'Mute';
   document.getElementById('btn-mute').classList.toggle('muted', isMuted);
 }
 
+// ─── In-call: hang up ────────────────────────────────────────────────────────
 function hangUp() {
   cleanup();
+  renderContacts();
   showScreen('screen-idle');
 }
 
-// 
-// BACK BUTTONS
-// 
-function goBack() {
-  cleanup();
-  showScreen('screen-idle');
+// ─── Copy my Peer ID ────────────────────────────────────────────────────────
+async function copyMyId() {
+  const id  = localStorage.getItem(KEY_ID);
+  const btn = document.getElementById('btn-copy-my-id');
+  if (!id) { showToast('ID not ready yet.', true); return; }
+  try {
+    await navigator.clipboard.writeText(id);
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  } catch {
+    showToast('Could not copy to clipboard.', true);
+  }
 }
 
-// 
-// INIT
-// 
+// ─── Save a new contact ───────────────────────────────────────────────────────
+function saveContact() {
+  const name = document.getElementById('contact-name-input').value.trim();
+  const id   = document.getElementById('contact-id-input').value.trim();
+  if (!name) { showToast('Enter a name.', true); return; }
+  if (!id)   { showToast("Paste your friend's Peer ID.", true); return; }
+  if (id === localStorage.getItem(KEY_ID)) {
+    showToast("That's your own ID!", true); return;
+  }
+  addOrUpdateContact(name, id);
+  document.getElementById('contact-name-input').value = '';
+  document.getElementById('contact-id-input').value   = '';
+  renderContacts();
+  showScreen('screen-idle');
+  showToast(name + ' added to contacts.');
+}
+
+// ─── Init ────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('btn-start-call').addEventListener('click', startCall);
-  document.getElementById('btn-join-call').addEventListener('click', joinCall);
-  document.getElementById('btn-connect-caller').addEventListener('click', connectCaller);
-  document.getElementById('btn-generate-answer').addEventListener('click', generateAnswer);
-  document.getElementById('btn-mute').addEventListener('click', toggleMute);
-  document.getElementById('btn-hangup').addEventListener('click', hangUp);
-  document.getElementById('btn-copy-offer').addEventListener('click', () => copyField('offer-sdp'));
-  document.getElementById('btn-copy-answer').addEventListener('click', () => copyField('answer-sdp'));
-  document.getElementById('btn-back-caller').addEventListener('click', goBack);
-  document.getElementById('btn-back-callee').addEventListener('click', goBack);
+  initPeer();
+  renderContacts();
+
+  // Home
+  document.getElementById('btn-copy-my-id')
+    .addEventListener('click', copyMyId);
+  document.getElementById('btn-add-contact')
+    .addEventListener('click', () => showScreen('screen-add-contact'));
+
+  // Add Contact screen
+  document.getElementById('btn-back-add')
+    .addEventListener('click', () => showScreen('screen-idle'));
+  document.getElementById('btn-save-contact')
+    .addEventListener('click', saveContact);
+  document.getElementById('contact-name-input')
+    .addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('contact-id-input').focus(); });
+  document.getElementById('contact-id-input')
+    .addEventListener('keydown', e => { if (e.key === 'Enter') saveContact(); });
+
+  // Incoming call screen
+  document.getElementById('btn-accept')
+    .addEventListener('click', acceptCall);
+  document.getElementById('btn-reject')
+    .addEventListener('click', rejectCall);
+
+  // Calling (outgoing) screen
+  document.getElementById('btn-cancel-call')
+    .addEventListener('click', cancelCall);
+
+  // In-call screen
+  document.getElementById('btn-mute')
+    .addEventListener('click', toggleMute);
+  document.getElementById('btn-hangup')
+    .addEventListener('click', hangUp);
 });

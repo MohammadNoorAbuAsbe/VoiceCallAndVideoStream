@@ -11,71 +11,90 @@
   <!--  Toast notification  -->
   <div id="toast" class="toast" role="alert" aria-live="assertive"></div>
 
-  <!--  Screen: Idle  -->
+  <!--  Screen: Idle / Home  -->
   <section id="screen-idle" class="screen active">
-    <div class="logo-wrap">
-      <svg class="logo-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <circle cx="24" cy="24" r="22" stroke="currentColor" stroke-width="2.5"/>
-        <path d="M16 20a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v4a8 8 0 0 1-16 0v-4Z" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
-        <path d="M24 32v6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-        <path d="M19 38h10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-      </svg>
-    </div>
-    <h1 class="app-title">VoiceCall</h1>
-    <p class="app-sub">Lightweight P2P voice  no servers, no accounts.</p>
-    <div class="btn-group">
-      <button id="btn-start-call" class="btn btn-primary">Start Call</button>
-      <button id="btn-join-call" class="btn btn-secondary">Join Call</button>
-    </div>
-    <p class="hint">Start = you create the invite code.<br>Join = your friend already sent you a code.</p>
-  </section>
-
-  <!--  Screen: Caller  -->
-  <section id="screen-caller" class="screen">
-    <button class="btn-back" id="btn-back-caller">&#8592; Back</button>
-    <h2>Start Call</h2>
-
-    <div id="caller-gathering" class="phase">
-      <div class="spinner"></div>
-      <p>Gathering your connection code&hellip;</p>
-    </div>
-
-    <div id="caller-share" class="phase hidden">
-      <label class="field-label">1&nbsp;&nbsp;Your invite code  <strong>send to your friend</strong></label>
-      <div class="sdp-wrap">
-        <textarea id="offer-sdp" class="sdp-box" readonly spellcheck="false"></textarea>
-        <button class="btn btn-copy" data-copy="offer-sdp" id="btn-copy-offer">Copy</button>
+    <div class="home-header">
+      <div class="home-title-row">
+        <svg class="logo-icon-sm" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="24" cy="24" r="22" stroke="currentColor" stroke-width="2.5"/>
+          <path d="M16 20a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v4a8 8 0 0 1-16 0v-4Z" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
+          <path d="M24 32v6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M19 38h10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+        </svg>
+        <h1 class="app-title-sm">VoiceCall</h1>
       </div>
-
-      <label class="field-label">2&nbsp;&nbsp;Paste your friend's response</label>
-      <textarea id="answer-sdp-input" class="sdp-box editable" placeholder="Paste response code here&hellip;" spellcheck="false"></textarea>
-      <button id="btn-connect-caller" class="btn btn-primary full-width">Connect</button>
-    </div>
-  </section>
-
-  <!--  Screen: Callee  -->
-  <section id="screen-callee" class="screen">
-    <button class="btn-back" id="btn-back-callee">&#8592; Back</button>
-    <h2>Join Call</h2>
-
-    <div id="callee-paste" class="phase">
-      <label class="field-label">1&nbsp;&nbsp;Paste your friend's invite code</label>
-      <textarea id="offer-sdp-input" class="sdp-box editable" placeholder="Paste invite code here&hellip;" spellcheck="false"></textarea>
-      <button id="btn-generate-answer" class="btn btn-primary full-width">Generate Response</button>
-    </div>
-
-    <div id="callee-share" class="phase hidden">
-      <div id="callee-gathering-hint" class="gathering-row">
-        <div class="spinner sm"></div>
-        <span>Generating your response&hellip;</span>
-      </div>
-      <div id="callee-share-ready" class="hidden">
-        <label class="field-label">2&nbsp;&nbsp;Your response  <strong>send back to your friend</strong></label>
-        <div class="sdp-wrap">
-          <textarea id="answer-sdp" class="sdp-box" readonly spellcheck="false"></textarea>
-          <button class="btn btn-copy" data-copy="answer-sdp" id="btn-copy-answer">Copy</button>
+      <div class="id-card">
+        <div class="id-card-inner">
+          <span class="id-label">Your ID</span>
+          <span id="my-peer-id" class="id-value">
+            <span class="id-spinner"></span>
+          </span>
         </div>
-        <p class="waiting-text">Waiting for friend to connect&hellip;</p>
+        <button class="btn btn-copy btn-sm" id="btn-copy-my-id">Copy</button>
+      </div>
+      <p class="id-hint">Share your ID with friends so they can call you. You only do this once.</p>
+    </div>
+
+    <div class="contacts-header">
+      <span class="contacts-title">Contacts</span>
+      <button id="btn-add-contact" class="btn btn-secondary btn-sm">+ Add Contact</button>
+    </div>
+    <div id="contacts-list" class="contacts-list"></div>
+  </section>
+
+  <!--  Screen: Add Contact  -->
+  <section id="screen-add-contact" class="screen">
+    <button class="btn-back" id="btn-back-add">&#8592; Back</button>
+    <h2>Add Contact</h2>
+    <p class="add-contact-hint">Ask your friend to open VoiceCall and copy their ID, then paste it below.</p>
+
+    <label class="field-label">Name</label>
+    <input id="contact-name-input" class="text-input" type="text" placeholder="e.g. John" maxlength="30" autocomplete="off" />
+
+    <label class="field-label" style="margin-top:16px;">Friend's Peer ID</label>
+    <input id="contact-id-input" class="text-input" type="text" placeholder="Paste their ID here…" autocomplete="off" spellcheck="false" />
+
+    <button id="btn-save-contact" class="btn btn-primary full-width" style="margin-top:20px;">Save Contact</button>
+  </section>
+
+  <!--  Screen: Calling (outgoing, waiting for answer)  -->
+  <section id="screen-calling" class="screen">
+    <div class="call-card">
+      <div class="calling-avatar" id="calling-avatar">?</div>
+      <p class="call-status-text">Calling…</p>
+      <p id="calling-peer-name" class="caller-name">—</p>
+    </div>
+    <button id="btn-cancel-call" class="btn btn-danger" style="margin-top:36px; align-self:center; padding: 10px 32px;">Cancel</button>
+  </section>
+
+  <!--  Screen: Incoming Call  -->
+  <section id="screen-incoming" class="screen">
+    <div class="call-card">
+      <div class="pulse-ring" style="background: var(--accent);"></div>
+      <div class="call-icon" style="background: var(--accent);">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8Z"/>
+        </svg>
+      </div>
+      <p class="call-status-text">Incoming Call</p>
+      <p id="incoming-caller-name" class="caller-name">Unknown</p>
+    </div>
+    <div class="call-controls" style="margin-top:36px;">
+      <div class="btn-circle-wrap">
+        <button id="btn-accept" class="btn-circle" style="background: var(--success);">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8Z"/>
+          </svg>
+        </button>
+        <span class="btn-circle-label">Accept</span>
+      </div>
+      <div class="btn-circle-wrap">
+        <button id="btn-reject" class="btn-circle hangup">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M17.25 3.09A10.94 10.94 0 0 0 3.09 17.25L1.39 18.95A1 1 0 0 0 2.8 20.36l2-2c.2-.2.46-.33.75-.34h.07a1 1 0 0 0 .63-.22l2.1-1.75a1 1 0 0 0 .2-1.3l-1.1-1.66a1 1 0 0 0-1.23-.37l-.76.34a8.94 8.94 0 0 1-.07-1.06 9 9 0 0 1 9-9c.35 0 .7.02 1.05.07l-.34.76a1 1 0 0 0 .37 1.23l1.66 1.1a1 1 0 0 0 1.3-.2l1.75-2.1a1 1 0 0 0 .22-.63V5.6c0-.29.13-.55.34-.75l2-2a1 1 0 0 0-1.41-1.41L19.25 3A10.94 10.94 0 0 0 17.25 3.09Z"/>
+          </svg>
+        </button>
+        <span class="btn-circle-label">Decline</span>
       </div>
     </div>
   </section>
@@ -90,37 +109,44 @@
         </svg>
       </div>
       <p class="call-status-text">Connected</p>
+      <p id="incall-peer-name" class="caller-name">—</p>
       <p class="call-timer" id="call-timer">00:00</p>
     </div>
     <div class="call-controls">
-      <button id="btn-mute" class="btn-circle" title="Mute">
-        <svg id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z"/>
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-          <line x1="12" y1="19" x2="12" y2="23"/>
-          <line x1="8" y1="23" x2="16" y2="23"/>
-        </svg>
-        <svg id="icon-mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hidden">
-          <line x1="1" y1="1" x2="23" y2="23"/>
-          <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
-          <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>
-          <line x1="12" y1="19" x2="12" y2="23"/>
-          <line x1="8" y1="23" x2="16" y2="23"/>
-        </svg>
-        <span>Mute</span>
-      </button>
-      <button id="btn-hangup" class="btn-circle hangup" title="Hang Up">
-        <svg viewBox="0 0 24 24" fill="currentColor">
-          <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8Z"/>
-        </svg>
-        <span>Hang Up</span>
-      </button>
+      <div class="btn-circle-wrap">
+        <button id="btn-mute" class="btn-circle" title="Mute">
+          <svg id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+          <svg id="icon-mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="hidden">
+            <line x1="1" y1="1" x2="23" y2="23"/>
+            <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
+            <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+            <line x1="8" y1="23" x2="16" y2="23"/>
+          </svg>
+        </button>
+        <span class="btn-circle-label">Mute</span>
+      </div>
+      <div class="btn-circle-wrap">
+        <button id="btn-hangup" class="btn-circle hangup" title="Hang Up">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8Z"/>
+          </svg>
+        </button>
+        <span class="btn-circle-label">Hang Up</span>
+      </div>
     </div>
   </section>
 
-  <!-- Hidden audio element for remote stream -->
+  <!--  Hidden audio element for remote stream  -->
   <audio id="remote-audio" autoplay playsinline></audio>
 
+  <!--  PeerJS (handles WebRTC signaling automatically)  -->
+  <script src="peerjs.min.js"></script>
   <script src="main.js"></script>
 </body>
 </html>

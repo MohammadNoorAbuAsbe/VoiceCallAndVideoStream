@@ -4,6 +4,7 @@
 :root {
   --bg:        #0f1117;
   --surface:   #1a1d27;
+  --surface2:  #22263a;
   --border:    #2a2d3a;
   --accent:    #5865f2;
   --accent-h:  #4752c4;
@@ -33,35 +34,220 @@ html, body {
   display: none;
   flex-direction: column;
   height: 100vh;
-  padding: 28px 24px 20px;
+  padding: 20px 20px 16px;
   overflow-y: auto;
   animation: fadeIn .18s ease;
 }
 .screen.active { display: flex; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; } }
 
-/*  Idle screen  */
+.hidden { display: none !important; }
+
+/* ─── Home screen ─────────────────────────────────────────────────────────── */
 #screen-idle {
+  gap: 0;
+  padding-top: 16px;
+}
+
+.home-header {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.home-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.logo-icon-sm { width: 26px; height: 26px; color: var(--accent); flex-shrink: 0; }
+.app-title-sm { font-size: 1.1rem; font-weight: 700; letter-spacing: -.3px; }
+
+/*  ID card  */
+.id-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+.id-card-inner {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.id-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: .4px;
+  text-transform: uppercase;
+}
+.id-value {
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 0.78rem;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.id-spinner {
+  display: inline-block;
+  width: 12px; height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+  vertical-align: middle;
+}
+.id-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/*  Contacts section  */
+.contacts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.contacts-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.contacts-list {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+.contacts-empty {
+  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  text-align: center;
-  gap: 14px;
-}
-.logo-wrap { color: var(--accent); margin-bottom: 4px; }
-.logo-icon  { width: 64px; height: 64px; }
-.app-title  { font-size: 1.75rem; font-weight: 700; letter-spacing: -.5px; }
-.app-sub    { color: var(--text-muted); font-size: 0.85rem; max-width: 280px; }
-
-.btn-group { display: flex; gap: 10px; margin-top: 8px; }
-.hint {
+  gap: 10px;
+  flex: 1;
   color: var(--text-muted);
-  font-size: 0.78rem;
+  font-size: 0.85rem;
   text-align: center;
-  line-height: 1.6;
-  max-width: 280px;
+  padding: 30px 20px;
+}
+.contacts-empty svg { width: 40px; height: 40px; opacity: .4; }
+.contacts-empty-sub { font-size: 0.78rem; }
+
+.contact-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  transition: background .15s;
+}
+.contact-row:hover { background: var(--surface2); }
+
+.contact-avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.contact-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.contact-name { font-size: 0.88rem; font-weight: 600; }
+.contact-sub  { font-size: 0.72rem; color: var(--text-muted); }
+
+.contact-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
 }
 
-/*  Buttons  */
+/* ─── Add Contact screen ──────────────────────────────────────────────────── */
+#screen-add-contact { gap: 0; }
+
+.add-contact-hint {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin-bottom: 18px;
+  line-height: 1.6;
+}
+
+.text-input {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.88rem;
+  padding: 10px 12px;
+  outline: none;
+  transition: border-color .15s;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.text-input:focus { border-color: var(--accent); }
+.text-input::placeholder { color: var(--text-muted); }
+
+/* ─── "Calling…" screen ──────────────────────────────────────────────────── */
+#screen-calling {
+  align-items: center;
+  justify-content: center;
+}
+.calling-avatar {
+  width: 72px; height: 72px;
+  border-radius: 50%;
+  background: var(--surface2);
+  border: 2px solid var(--border);
+  color: var(--text);
+  font-size: 2rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+  animation: pulse-border 1.5s ease-in-out infinite;
+}
+@keyframes pulse-border {
+  0%, 100% { border-color: var(--border); }
+  50%       { border-color: var(--accent); }
+}
+
+/* ─── Caller name label (used in calling/incoming/incall) ──────────────────── */
+.caller-name {
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--text);
+  text-align: center;
+  margin-top: 2px;
+}
+
+/* ─── Buttons ─────────────────────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -88,6 +274,17 @@ html, body {
 }
 .btn-secondary:hover { background: var(--border); }
 
+.btn-danger   { background: var(--danger); color: #fff; }
+.btn-danger:hover { background: var(--danger-h); }
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  padding: 6px 10px;
+}
+.btn-ghost:hover { color: var(--danger); background: rgba(237,66,69,.1); border-color: rgba(237,66,69,.3); }
+
 .btn-copy {
   background: var(--surface);
   color: var(--accent);
@@ -97,6 +294,8 @@ html, body {
 }
 .btn-copy:hover { background: var(--border); }
 
+.btn-sm { padding: 6px 14px; font-size: 0.8rem; }
+
 .full-width { width: 100%; margin-top: 8px; }
 
 .btn-back {
@@ -105,78 +304,28 @@ html, body {
   color: var(--text-muted);
   cursor: pointer;
   font-size: 0.83rem;
-  padding: 0 0 12px;
+  padding: 0 0 14px;
   text-align: left;
   transition: color .15s;
 }
 .btn-back:hover { color: var(--text); }
 
-/*  Caller / Callee screens  */
-#screen-caller, #screen-callee {
-  gap: 0;
-}
 h2 {
   font-size: 1.15rem;
   font-weight: 700;
-  margin-bottom: 18px;
+  margin-bottom: 10px;
 }
-
-.phase { display: flex; flex-direction: column; gap: 10px; }
-.hidden { display: none !important; }
 
 .field-label {
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 600;
   color: var(--text-muted);
-  margin-top: 14px;
-  margin-bottom: 4px;
+  margin-bottom: 5px;
+  display: block;
   letter-spacing: .3px;
 }
-.field-label strong { color: var(--text); }
 
-.sdp-wrap { position: relative; }
-.sdp-box {
-  width: 100%;
-  min-height: 110px;
-  max-height: 140px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 0.72rem;
-  padding: 10px 12px;
-  resize: none;
-  outline: none;
-  transition: border-color .15s;
-  overflow-y: auto;
-}
-.sdp-box.editable { cursor: text; user-select: text; -webkit-user-select: text; }
-.sdp-box.editable:focus { border-color: var(--accent); }
-.sdp-box[readonly] { color: var(--text-muted); cursor: default; }
-
-.sdp-wrap .btn-copy {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-}
-
-.gathering-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 16px 0;
-  color: var(--text-muted);
-  font-size: 0.85rem;
-}
-.waiting-text {
-  color: var(--text-muted);
-  font-size: 0.82rem;
-  text-align: center;
-  margin-top: 14px;
-}
-
-/*  Spinner  */
+/* ─── Spinner ─────────────────────────────────────────────────────────────── */
 .spinner {
   width: 28px; height: 28px;
   border: 3px solid var(--border);
@@ -188,21 +337,11 @@ h2 {
 .spinner.sm { width: 18px; height: 18px; border-width: 2px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-#caller-gathering {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 30px 0;
-  color: var(--text-muted);
-  font-size: 0.85rem;
-}
-
-/*  In-call screen  */
-#screen-incall {
+/* ─── In-call / incoming call screens ────────────────────────────────────── */
+#screen-incall, #screen-incoming {
   align-items: center;
   justify-content: center;
-  gap: 32px;
+  gap: 0;
 }
 
 .call-card {
@@ -210,7 +349,7 @@ h2 {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 @keyframes pulse {
@@ -221,7 +360,7 @@ h2 {
 .pulse-ring {
   position: absolute;
   top: 50%; left: 50%;
-  translate: -50% -50%;
+  translate: -50% -70%;
   width: 80px; height: 80px;
   border-radius: 50%;
   background: var(--success);
@@ -241,9 +380,10 @@ h2 {
 .call-icon svg { width: 36px; height: 36px; }
 
 .call-status-text {
-  font-size: 1.1rem;
+  font-size: 0.95rem;
   font-weight: 600;
-  margin-top: 6px;
+  margin-top: 10px;
+  color: var(--text-muted);
 }
 .call-timer {
   font-size: 0.88rem;
@@ -251,13 +391,25 @@ h2 {
   font-variant-numeric: tabular-nums;
 }
 
-.call-controls { display: flex; gap: 20px; align-items: center; }
+.call-controls { display: flex; gap: 28px; align-items: flex-start; margin-top: 36px; }
 
-.btn-circle {
+/* Circle buttons + label below */
+.btn-circle-wrap {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+}
+.btn-circle-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.btn-circle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 64px; height: 64px;
   border-radius: 50%;
   border: none;
@@ -265,12 +417,8 @@ h2 {
   color: var(--text);
   cursor: pointer;
   transition: background .15s, transform .1s;
-  font-size: 0.7rem;
-  font-family: var(--font);
-  position: relative;
 }
-.btn-circle svg   { width: 24px; height: 24px; }
-.btn-circle span  { font-size: 0.65rem; position: absolute; bottom: -18px; white-space: nowrap; color: var(--text-muted); }
+.btn-circle svg   { width: 26px; height: 26px; }
 .btn-circle:hover { background: var(--border); }
 .btn-circle:active { transform: scale(.93); }
 .btn-circle.muted { background: #2c1f1f; color: var(--danger); }
