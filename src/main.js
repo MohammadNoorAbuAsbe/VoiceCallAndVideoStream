@@ -255,7 +255,10 @@ async function startCall(peerId, peerName) {
   }
 
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      video: false
+    });
   } catch (e) {
     handleMicError(e);
     return;
@@ -288,7 +291,10 @@ async function acceptCall() {
   const peerName = document.getElementById('incoming-caller-name').textContent;
 
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      video: false
+    });
   } catch (e) {
     handleMicError(e);
     call.close();
