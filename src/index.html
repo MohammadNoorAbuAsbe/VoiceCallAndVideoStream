@@ -22,6 +22,12 @@
           <path d="M19 38h10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
         </svg>
         <h1 class="app-title-sm">VoiceCall</h1>
+        <button id="btn-settings" class="btn-icon-ghost" title="Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
+          </svg>
+        </button>
       </div>
       <div class="id-card">
         <div class="id-card-inner">
@@ -40,6 +46,72 @@
       <button id="btn-add-contact" class="btn btn-secondary btn-sm">+ Add Contact</button>
     </div>
     <div id="contacts-list" class="contacts-list"></div>
+
+    <!--  Group call bar — appears when ≥2 contacts are checked  -->
+    <div id="group-call-bar" class="group-call-bar hidden">
+      <span id="group-call-count" class="group-call-count">0 selected</span>
+      <button id="btn-clear-selection" class="btn btn-ghost btn-sm">Clear</button>
+      <button id="btn-group-call" class="btn btn-primary btn-sm">Group Call</button>
+    </div>
+  </section>
+
+  <!--  Screen: Settings  -->
+  <section id="screen-settings" class="screen">
+    <button class="btn-back" id="btn-back-settings">&#8592; Back</button>
+    <h2>Settings</h2>
+
+    <div class="settings-section">
+      <span class="settings-section-title">Audio Devices</span>
+
+      <label class="field-label">Microphone (Input)</label>
+      <select id="select-input-device" class="text-input select-input">
+        <option value="">Default</option>
+      </select>
+
+      <label class="field-label" style="margin-top:14px;">Speaker (Output)</label>
+      <select id="select-output-device" class="text-input select-input">
+        <option value="">Default</option>
+      </select>
+      <p class="settings-hint" style="margin-top:8px;">Output switching requires browser support (Chrome / Edge).</p>
+    </div>
+
+    <div class="settings-section" style="margin-top:14px;">
+      <span class="settings-section-title">Noise Processing</span>
+      <p class="settings-hint">These can also be toggled live during a call.</p>
+
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <span class="toggle-label">Noise Suppression</span>
+          <span class="toggle-sub">Reduces background noise</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="toggle-noise-suppression" />
+          <span class="toggle-knob"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <span class="toggle-label">Echo Cancellation</span>
+          <span class="toggle-sub">Prevents audio feedback loops</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="toggle-echo-cancellation" />
+          <span class="toggle-knob"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-info">
+          <span class="toggle-label">Auto Gain Control</span>
+          <span class="toggle-sub">Automatically adjusts mic volume</span>
+        </div>
+        <label class="toggle-switch">
+          <input type="checkbox" id="toggle-auto-gain" />
+          <span class="toggle-knob"></span>
+        </label>
+      </div>
+    </div>
   </section>
 
   <!--  Screen: Add Contact  -->
@@ -101,17 +173,10 @@
 
   <!--  Screen: In-Call  -->
   <section id="screen-incall" class="screen">
-    <div class="call-card">
-      <div class="pulse-ring"></div>
-      <div class="call-icon">
-        <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M10 14a2 2 0 0 1 2-2h4.17a2 2 0 0 1 1.98 1.72l.9 6.28a2 2 0 0 1-1.1 2.13l-2.18 1.09a22.05 22.05 0 0 0 9.01 9.01l1.09-2.18a2 2 0 0 1 2.13-1.1l6.28.9A2 2 0 0 1 36 31.83V36a2 2 0 0 1-2 2C18.54 38 10 29.46 10 14Z" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
-        </svg>
-      </div>
-      <p class="call-status-text">Connected</p>
-      <p id="incall-peer-name" class="caller-name">—</p>
-      <p class="call-timer" id="call-timer">00:00</p>
-    </div>
+    <p class="call-status-text">In Call</p>
+    <p id="incall-count" class="incall-count"></p>
+    <div id="participant-list" class="participant-list"></div>
+    <p class="call-timer" id="call-timer">00:00</p>
     <div class="call-controls">
       <div class="btn-circle-wrap">
         <button id="btn-mute" class="btn-circle" title="Mute">
@@ -132,6 +197,26 @@
         <span class="btn-circle-label">Mute</span>
       </div>
       <div class="btn-circle-wrap">
+        <button id="btn-invite" class="btn-circle" title="Invite to call">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+            <circle cx="9" cy="7" r="4"/>
+            <line x1="19" y1="8" x2="19" y2="14"/>
+            <line x1="22" y1="11" x2="16" y2="11"/>
+          </svg>
+        </button>
+        <span class="btn-circle-label">Invite</span>
+      </div>
+      <div class="btn-circle-wrap">
+        <button id="btn-settings-incall" class="btn-circle" title="Audio Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/>
+          </svg>
+        </button>
+        <span class="btn-circle-label">Audio</span>
+      </div>
+      <div class="btn-circle-wrap">
         <button id="btn-hangup" class="btn-circle hangup" title="Hang Up">
           <svg viewBox="0 0 24 24" fill="currentColor">
             <path d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1-9.4 0-17-7.6-17-17 0-.6.4-1 1-1h3.5c.6 0 1 .4 1 1 0 1.3.2 2.5.6 3.6.1.3 0 .7-.2 1L6.6 10.8Z"/>
@@ -142,8 +227,65 @@
     </div>
   </section>
 
-  <!--  Hidden audio element for remote stream  -->
-  <audio id="remote-audio" autoplay playsinline></audio>
+  <!--  Invite overlay (slide-up sheet shown while in-call)  -->
+  <div id="invite-overlay" class="invite-overlay hidden">
+    <div class="invite-sheet">
+      <div class="invite-sheet-header">
+        <h3>Add to Call</h3>
+        <button id="btn-close-invite" class="btn-back" style="padding:0;">&#10005;</button>
+      </div>
+      <div id="invite-list"></div>
+    </div>
+  </div>
+
+  <!--  In-call Audio Settings overlay (slide-up sheet)  -->
+  <div id="settings-overlay" class="invite-overlay hidden">
+    <div class="invite-sheet">
+      <div class="invite-sheet-header">
+        <h3>Audio Settings</h3>
+        <button id="btn-close-settings-sheet" class="btn-back" style="padding:0;">&#10005;</button>
+      </div>
+      <div class="settings-sheet-body">
+        <p class="settings-hint">Changes apply instantly to your live call.</p>
+
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <span class="toggle-label">Noise Suppression</span>
+            <span class="toggle-sub">Reduces background noise</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-noise-suppression-sheet" />
+            <span class="toggle-knob"></span>
+          </label>
+        </div>
+
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <span class="toggle-label">Echo Cancellation</span>
+            <span class="toggle-sub">Prevents audio feedback loops</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-echo-cancellation-sheet" />
+            <span class="toggle-knob"></span>
+          </label>
+        </div>
+
+        <div class="toggle-row">
+          <div class="toggle-info">
+            <span class="toggle-label">Auto Gain Control</span>
+            <span class="toggle-sub">Automatically adjusts mic volume</span>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="toggle-auto-gain-sheet" />
+            <span class="toggle-knob"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!--  Dynamic audio elements are injected here by main.js  -->
+  <div id="audio-container" aria-hidden="true"></div>
 
   <!--  PeerJS (handles WebRTC signaling automatically)  -->
   <script src="peerjs.min.js"></script>

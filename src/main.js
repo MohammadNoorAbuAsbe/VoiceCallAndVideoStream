@@ -1,26 +1,29 @@
 ﻿// ─────────────────────────────────────────────────────────────────────────────
-//  VoiceCall — PeerJS-based, auto-signaling, no copy/paste required
+//  VoiceCall — PeerJS-based, full-mesh group calls (up to 6 participants)
 //
 //  How it works:
 //    • Each user has a persistent Peer ID stored in localStorage.
 //    • They share their ID with a friend once (like a phone number).
-//    • After that, calling is one click — PeerJS handles the SDP exchange
-//      automatically through its free signaling relay (0.peerjs.com).
-//    • Audio travels P2P (WebRTC), not through the relay.
+//    • 1-to-1 or group (up to 6): select contacts on home screen, tap Call.
+//    • Full-mesh P2P: each participant calls every other — no server needed.
+//    • Audio travels directly P2P after signaling; relay only handles handshake.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── Storage keys ────────────────────────────────────────────────────────────
 const KEY_ID       = 'vcall_peer_id';
 const KEY_CONTACTS = 'vcall_contacts';   // JSON: [{id, name, lastCall}]
+const KEY_SETTINGS = 'vcall_settings';   // JSON: audio/noise settings
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const MAX_GROUP = 6;   // you + 5 others
 
 // ─── State ───────────────────────────────────────────────────────────────────
-let peer          = null;   // PeerJS Peer instance
-let activeCall    = null;   // PeerJS MediaConnection
-let localStream   = null;   // MediaStream from getUserMedia
-let isMuted       = false;
-let callTimerID   = null;
-let callSeconds   = 0;
-let callTimeout   = null;   // auto-cancel timer for unanswered outgoing calls
+let peer         = null;                // PeerJS Peer instance
+let activeCalls  = new Map();           // peerId → MediaConnection
+let localStream  = null;                // MediaStream from getUserMedia
+let isMuted      = false;
+let callTimerID  = null;
+let callSeconds  = 0;
 
 // ─── Contact Book (localStorage) ─────────────────────────────────────────────
 function loadContacts() {
@@ -46,6 +49,138 @@ function touchLastCall(id) {
 function getContactName(id) {
   const c = loadContacts().find(c => c.id === id);
   return c ? c.name : id.slice(0, 10) + '…';
+}
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+function loadSettings() {
+  try { return JSON.parse(localStorage.getItem(KEY_SETTINGS) || '{}'); }
+  catch { return {}; }
+}
+function saveSettings(s) {
+  localStorage.setItem(KEY_SETTINGS, JSON.stringify(s));
+}
+
+/** Build getUserMedia audio constraints from current settings. */
+function getAudioConstraints() {
+  const s = loadSettings();
+  const c = {
+    noiseSuppression: s.noiseSuppression !== false,
+    echoCancellation: s.echoCancellation !== false,
+    autoGainControl:  s.autoGainControl  !== false,
+  };
+  if (s.inputDeviceId) c.deviceId = { exact: s.inputDeviceId };
+  return c;
+}
+
+/** Populate the device <select> dropdowns on the settings screen. */
+async function populateDeviceDropdowns() {
+  // Briefly request permission so device labels are revealed
+  if (!localStream) {
+    try {
+      const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+      tmp.getTracks().forEach(t => t.stop());
+    } catch (_) {}
+  }
+  let devices;
+  try { devices = await navigator.mediaDevices.enumerateDevices(); }
+  catch { devices = []; }
+
+  const inputs  = devices.filter(d => d.kind === 'audioinput');
+  const outputs = devices.filter(d => d.kind === 'audiooutput');
+  const s       = loadSettings();
+
+  const selIn  = document.getElementById('select-input-device');
+  const selOut = document.getElementById('select-output-device');
+
+  selIn.innerHTML = '<option value="">Default</option>' +
+    inputs.map(d => `<option value="${escHtml(d.deviceId)}" ${d.deviceId === s.inputDeviceId ? 'selected' : ''}>${escHtml(d.label || 'Microphone ' + d.deviceId.slice(0, 6))}</option>`).join('');
+
+  selOut.innerHTML = '<option value="">Default</option>' +
+    outputs.map(d => `<option value="${escHtml(d.deviceId)}" ${d.deviceId === s.outputDeviceId ? 'selected' : ''}>${escHtml(d.label || 'Speaker ' + d.deviceId.slice(0, 6))}</option>`).join('');
+}
+
+/** Apply the chosen output device to all current (and future) audio elements. */
+function applyOutputDevice(deviceId) {
+  document.querySelectorAll('#audio-container audio').forEach(audio => {
+    if (typeof audio.setSinkId === 'function' && deviceId) {
+      audio.setSinkId(deviceId).catch(() => {});
+    }
+  });
+}
+
+/** Apply noise processing constraints to the live local stream without restarting. */
+async function applyNoiseConstraints() {
+  if (!localStream) return;
+  const s = loadSettings();
+  const constraints = {
+    noiseSuppression: s.noiseSuppression !== false,
+    echoCancellation: s.echoCancellation !== false,
+    autoGainControl:  s.autoGainControl  !== false,
+  };
+  for (const track of localStream.getAudioTracks()) {
+    try { await track.applyConstraints(constraints); } catch (_) {}
+  }
+}
+
+/** Switch the active microphone mid-call (or just saves the preference if idle). */
+async function switchMicDevice(deviceId) {
+  if (!localStream) return; // not in a call — setting saved, will apply on next call
+  const oldTrack = localStream.getAudioTracks()[0];
+  let newStream;
+  try {
+    const constraints = getAudioConstraints();
+    if (deviceId) constraints.deviceId = { exact: deviceId };
+    newStream = await navigator.mediaDevices.getUserMedia({ audio: constraints, video: false });
+  } catch (e) {
+    showToast('Could not switch microphone: ' + e.message, true);
+    return;
+  }
+  const newTrack = newStream.getAudioTracks()[0];
+  newTrack.enabled = !isMuted; // preserve mute state
+
+  // Swap track in localStream
+  localStream.removeTrack(oldTrack);
+  localStream.addTrack(newTrack);
+  oldTrack.stop();
+
+  // Replace track in every live peer connection
+  for (const call of activeCalls.values()) {
+    const sender = call.peerConnection?.getSenders().find(s => s.track?.kind === 'audio');
+    if (sender) { try { await sender.replaceTrack(newTrack); } catch (_) {} }
+  }
+  showToast('Microphone switched.');
+}
+
+/** Sync all toggle checkboxes (settings screen + in-call sheet) to stored settings. */
+function syncSettingsToggles() {
+  const s  = loadSettings();
+  const ns = s.noiseSuppression !== false;
+  const ec = s.echoCancellation !== false;
+  const ag = s.autoGainControl  !== false;
+  [
+    ['toggle-noise-suppression',       ns],
+    ['toggle-echo-cancellation',       ec],
+    ['toggle-auto-gain',               ag],
+    ['toggle-noise-suppression-sheet', ns],
+    ['toggle-echo-cancellation-sheet', ec],
+    ['toggle-auto-gain-sheet',         ag],
+  ].forEach(([id, val]) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = val;
+  });
+}
+
+function openSettingsSheet() {
+  syncSettingsToggles();
+  document.getElementById('settings-overlay').classList.remove('hidden');
+}
+function closeSettingsSheet() {
+  document.getElementById('settings-overlay').classList.add('hidden');
+}
+function openSettingsScreen() {
+  populateDeviceDropdowns();
+  syncSettingsToggles();
+  showScreen('screen-settings');
 }
 
 // ─── UI helpers ──────────────────────────────────────────────────────────────
@@ -77,6 +212,23 @@ function relativeTime(ts) {
   return new Date(ts).toLocaleDateString();
 }
 
+// ─── Contact selection state (for group calling) ──────────────────────────────
+const selectedIds = new Set();
+
+function updateGroupCallBar() {
+  const bar   = document.getElementById('group-call-bar');
+  const count = document.getElementById('group-call-count');
+  const btn   = document.getElementById('btn-group-call');
+  if (!bar) return;
+  if (selectedIds.size >= 2) {
+    bar.classList.remove('hidden');
+    count.textContent = selectedIds.size + ' selected';
+    btn.textContent   = 'Group Call (' + selectedIds.size + ')';
+  } else {
+    bar.classList.add('hidden');
+  }
+}
+
 // ─── Contacts list render ─────────────────────────────────────────────────────
 function renderContacts() {
   const list = loadContacts();
@@ -98,6 +250,11 @@ function renderContacts() {
 
   el.innerHTML = list.map(c => `
     <div class="contact-row" data-id="${escHtml(c.id)}">
+      <div class="contact-check-wrap">
+        <input type="checkbox" class="contact-check" data-id="${escHtml(c.id)}"
+               aria-label="Select ${escHtml(c.name)}"
+               ${selectedIds.has(c.id) ? 'checked' : ''} />
+      </div>
       <div class="contact-avatar">${escHtml(c.name[0].toUpperCase())}</div>
       <div class="contact-info">
         <span class="contact-name">${escHtml(c.name)}</span>
@@ -112,21 +269,91 @@ function renderContacts() {
       </div>
     </div>`).join('');
 
+  el.querySelectorAll('.contact-check').forEach(chk => {
+    chk.addEventListener('change', () => {
+      if (chk.checked) selectedIds.add(chk.dataset.id);
+      else             selectedIds.delete(chk.dataset.id);
+      updateGroupCallBar();
+    });
+  });
+
   el.querySelectorAll('.btn-call').forEach(btn =>
     btn.addEventListener('click', () => startCall(btn.dataset.id, btn.dataset.name)));
 
   el.querySelectorAll('.btn-del').forEach(btn =>
     btn.addEventListener('click', () => {
+      selectedIds.delete(btn.dataset.id);
       removeContact(btn.dataset.id);
       renderContacts();
+      updateGroupCallBar();
     }));
+}
+
+// ─── Participant list render (in-call screen) ─────────────────────────────────
+function renderParticipants() {
+  const el = document.getElementById('participant-list');
+  if (!el) return;
+
+  const participants = [
+    { id: 'me', name: 'You', connected: true, isMe: true },
+    ...Array.from(activeCalls.entries()).map(([id, call]) => ({
+      id,
+      name: getContactName(id),
+      connected: call.open,
+      isMe: false
+    }))
+  ];
+
+  el.innerHTML = participants.map(p => `
+    <div class="participant-chip ${p.isMe ? 'me' : (p.connected ? 'connected' : 'connecting')}">
+      <div class="participant-avatar">${escHtml(p.name[0].toUpperCase())}</div>
+      <span class="participant-name">${escHtml(p.name)}</span>
+      ${!p.connected && !p.isMe ? '<span class="participant-status">calling…</span>' : ''}
+    </div>`).join('');
+
+  const badge = document.getElementById('incall-count');
+  if (badge) {
+    const n = participants.length;
+    badge.textContent = n + ' in call';
+  }
+
+  // Show/hide invite button based on capacity
+  const inviteBtn = document.getElementById('btn-invite');
+  if (inviteBtn) {
+    inviteBtn.disabled = activeCalls.size >= MAX_GROUP - 1;
+    inviteBtn.title    = activeCalls.size >= MAX_GROUP - 1 ? 'Call is full (6 max)' : 'Invite someone';
+  }
+}
+
+// ─── Audio element management ─────────────────────────────────────────────────
+function getOrCreateAudio(peerId) {
+  const existingId = 'audio-' + peerId;
+  let audio = document.getElementById(existingId);
+  if (!audio) {
+    audio         = document.createElement('audio');
+    audio.id      = existingId;
+    audio.autoplay = true;
+    audio.setAttribute('playsinline', '');
+    document.getElementById('audio-container').appendChild(audio);
+    // Apply saved output device (Chrome/Edge only)
+    const { outputDeviceId } = loadSettings();
+    if (outputDeviceId && typeof audio.setSinkId === 'function') {
+      audio.setSinkId(outputDeviceId).catch(() => {});
+    }
+  }
+  return audio;
+}
+
+function removeAudio(peerId) {
+  const audio = document.getElementById('audio-' + peerId);
+  if (audio) audio.remove();
 }
 
 // ─── PeerJS initialization ───────────────────────────────────────────────────
 function initPeer() {
   const savedId = localStorage.getItem(KEY_ID) || undefined;
   peer = new Peer(savedId, {
-    // PeerJS free cloud server — only used for the initial handshake (~2 KB/call)
+    // Free PeerJS cloud — only used for the initial handshake (~2 KB/call).
     // Audio travels directly P2P after that.
     config: {
       iceServers: [
@@ -145,12 +372,24 @@ function initPeer() {
 
   // Someone is calling us
   peer.on('call', (incomingCall) => {
-    // If already in a call, decline gracefully
-    if (activeCall) {
-      incomingCall.close();
+    const inCall = activeCalls.size > 0;
+
+    if (inCall) {
+      // Already in call — auto-join if room available, else decline
+      if (activeCalls.size >= MAX_GROUP - 1 || !localStream) {
+        incomingCall.close();
+        return;
+      }
+      activeCalls.set(incomingCall.peer, incomingCall);
+      incomingCall.answer(localStream);
+      attachCallHandlers(incomingCall, getContactName(incomingCall.peer));
+      showToast(getContactName(incomingCall.peer) + ' joined the call.');
+      renderParticipants();
       return;
     }
-    activeCall = incomingCall;
+
+    // Not in a call — show incoming screen
+    activeCalls.set(incomingCall.peer, incomingCall);
     const callerName = getContactName(incomingCall.peer);
     document.getElementById('incoming-caller-name').textContent = callerName;
     showScreen('screen-incoming');
@@ -167,7 +406,6 @@ function initPeer() {
   });
 
   peer.on('disconnected', () => {
-    // Auto-reconnect to signaling server (needed to keep receiving calls)
     setTimeout(() => { if (peer && !peer.destroyed) peer.reconnect(); }, 2000);
   });
 }
@@ -203,50 +441,75 @@ function stopCallTimer() { clearInterval(callTimerID); callTimerID = null; }
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 function cleanup() {
   stopCallTimer();
-  clearTimeout(callTimeout); callTimeout = null;
-  if (activeCall)  { activeCall.close();  activeCall  = null; }
+  activeCalls.forEach(c => { try { c.close(); } catch (_) {} });
+  activeCalls.clear();
   if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
-  document.getElementById('remote-audio').srcObject = null;
+  // Remove all dynamic audio elements
+  const container = document.getElementById('audio-container');
+  if (container) container.innerHTML = '';
   document.getElementById('call-timer').textContent = '00:00';
-  isMuted      = false;
-  callSeconds  = 0;
+  const pl = document.getElementById('participant-list');
+  if (pl) pl.innerHTML = '';
+  const badge = document.getElementById('incall-count');
+  if (badge) badge.textContent = '';
+  isMuted     = false;
+  callSeconds = 0;
   // Reset mute button state
   document.getElementById('icon-mic')?.classList.remove('hidden');
   document.getElementById('icon-mic-off')?.classList.add('hidden');
   document.getElementById('btn-mute')?.classList.remove('muted');
-  const lbl = document.querySelector('#btn-mute + .btn-circle-label, #btn-mute ~ span');
-  if (lbl) lbl.textContent = 'Mute';
 }
 
-// ─── Attach handlers to an active call (outgoing OR incoming) ─────────────────
-function attachCallHandlers(call, peerName) {
+// ─── Attach handlers to a call connection ─────────────────────────────────────
+// timeoutId: optional per-peer auto-cancel timer handle
+function attachCallHandlers(call, peerName, timeoutId = null) {
   call.on('stream', (remoteStream) => {
-    clearTimeout(callTimeout); callTimeout = null;
-    document.getElementById('remote-audio').srcObject = remoteStream;
-    document.getElementById('incall-peer-name').textContent = peerName;
+    clearTimeout(timeoutId);
+    // Wire up audio
+    getOrCreateAudio(call.peer).srcObject = remoteStream;
     touchLastCall(call.peer);
     renderContacts();
-    startCallTimer();
+    renderParticipants();
+    // Start timer once on first stream
+    if (!callTimerID) startCallTimer();
     showScreen('screen-incall');
   });
 
   call.on('close', () => {
-    const wasConnected = document.getElementById('screen-incall').classList.contains('active');
-    cleanup();
-    renderContacts();
-    showScreen('screen-idle');
-    if (wasConnected) showToast('Call ended.');
+    clearTimeout(timeoutId);
+    activeCalls.delete(call.peer);
+    removeAudio(call.peer);
+    renderParticipants();
+
+    if (activeCalls.size === 0) {
+      const wasConnected = document.getElementById('screen-incall').classList.contains('active');
+      cleanup();
+      renderContacts();
+      showScreen('screen-idle');
+      if (wasConnected) showToast('Call ended.');
+    } else {
+      showToast(peerName + ' left the call.');
+    }
   });
 
   call.on('error', (err) => {
-    cleanup();
-    renderContacts();
-    showScreen('screen-idle');
-    showToast('Call error: ' + (err.message || String(err)), true);
+    clearTimeout(timeoutId);
+    activeCalls.delete(call.peer);
+    removeAudio(call.peer);
+    renderParticipants();
+
+    if (activeCalls.size === 0) {
+      cleanup();
+      renderContacts();
+      showScreen('screen-idle');
+      showToast('Call error: ' + (err.message || String(err)), true);
+    } else {
+      showToast(peerName + ': connection error.', true);
+    }
   });
 }
 
-// ─── Outgoing call ───────────────────────────────────────────────────────────
+// ─── Outgoing: single contact ─────────────────────────────────────────────────
 async function startCall(peerId, peerName) {
   if (!peer || peer.disconnected) {
     showToast('Reconnecting to network…', true);
@@ -256,49 +519,90 @@ async function startCall(peerId, peerName) {
 
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      audio: getAudioConstraints(),
       video: false
     });
-  } catch (e) {
-    handleMicError(e);
-    return;
-  }
+  } catch (e) { handleMicError(e); return; }
 
   document.getElementById('calling-peer-name').textContent = peerName;
-  // Avatar initial
   const avatar = document.getElementById('calling-avatar');
   if (avatar) avatar.textContent = peerName[0]?.toUpperCase() || '?';
   showScreen('screen-calling');
 
-  const call = peer.call(peerId, localStream);
-  activeCall  = call;
+  const call     = peer.call(peerId, localStream);
+  activeCalls.set(peerId, call);
 
-  // Auto-cancel if no answer in 40 seconds
-  callTimeout = setTimeout(() => {
+  const timeout = setTimeout(() => {
     showToast('No answer.', true);
     cleanup();
     renderContacts();
     showScreen('screen-idle');
   }, 40_000);
 
-  attachCallHandlers(call, peerName);
+  attachCallHandlers(call, peerName, timeout);
+}
+
+// ─── Outgoing: group call ─────────────────────────────────────────────────────
+async function startGroupCall(peerEntries) {
+  // peerEntries: [{id, name}, ...]
+  if (!peer || peer.disconnected) {
+    showToast('Reconnecting to network…', true);
+    peer.reconnect();
+    return;
+  }
+
+  const capped = peerEntries.slice(0, MAX_GROUP - 1);
+
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: getAudioConstraints(),
+      video: false
+    });
+  } catch (e) { handleMicError(e); return; }
+
+  // Go straight to in-call screen; participants show "calling…" until they answer
+  showScreen('screen-incall');
+  startCallTimer();
+
+  for (const { id, name } of capped) {
+    const call = peer.call(id, localStream);
+    activeCalls.set(id, call);
+
+    const timeout = setTimeout(() => {
+      if (!call.open) {
+        call.close();
+        activeCalls.delete(id);
+        renderParticipants();
+        showToast(name + ' didn\'t answer.');
+        if (activeCalls.size === 0) {
+          cleanup();
+          renderContacts();
+          showScreen('screen-idle');
+        }
+      }
+    }, 40_000);
+
+    attachCallHandlers(call, name, timeout);
+  }
+
+  renderParticipants();
 }
 
 // ─── Accept incoming call ────────────────────────────────────────────────────
 async function acceptCall() {
-  if (!activeCall) return;
-  const call     = activeCall;
-  const peerName = document.getElementById('incoming-caller-name').textContent;
+  if (activeCalls.size === 0) return;
+  const [peerId, call] = activeCalls.entries().next().value;
+  const peerName       = document.getElementById('incoming-caller-name').textContent;
 
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      audio: getAudioConstraints(),
       video: false
     });
   } catch (e) {
     handleMicError(e);
     call.close();
-    activeCall = null;
+    activeCalls.delete(peerId);
     showScreen('screen-idle');
     return;
   }
@@ -309,7 +613,8 @@ async function acceptCall() {
 
 // ─── Reject / cancel ─────────────────────────────────────────────────────────
 function rejectCall() {
-  if (activeCall) { activeCall.close(); activeCall = null; }
+  activeCalls.forEach(c => c.close());
+  activeCalls.clear();
   cleanup();
   showScreen('screen-idle');
 }
@@ -334,6 +639,63 @@ function hangUp() {
   cleanup();
   renderContacts();
   showScreen('screen-idle');
+}
+
+// ─── Invite sheet (add someone mid-call) ─────────────────────────────────────
+function openInviteSheet() {
+  const contacts  = loadContacts();
+  const inCallIds = new Set(activeCalls.keys());
+  const available = contacts.filter(c => !inCallIds.has(c.id));
+  const full      = activeCalls.size >= MAX_GROUP - 1;
+
+  const list = document.getElementById('invite-list');
+  if (available.length === 0 || full) {
+    list.innerHTML = `<p class="invite-empty">${full ? 'Call is full (6 participants max).' : 'All contacts are already in the call.'}</p>`;
+  } else {
+    list.innerHTML = available.map(c => `
+      <div class="invite-row">
+        <div class="contact-avatar">${escHtml(c.name[0].toUpperCase())}</div>
+        <div class="contact-info">
+          <span class="contact-name">${escHtml(c.name)}</span>
+        </div>
+        <button class="btn btn-primary btn-sm btn-invite-contact"
+                data-id="${escHtml(c.id)}"
+                data-name="${escHtml(c.name)}">Add</button>
+      </div>`).join('');
+
+    list.querySelectorAll('.btn-invite-contact').forEach(btn =>
+      btn.addEventListener('click', () => {
+        inviteToCall(btn.dataset.id, btn.dataset.name);
+        closeInviteSheet();
+      })
+    );
+  }
+
+  document.getElementById('invite-overlay').classList.remove('hidden');
+}
+
+function closeInviteSheet() {
+  document.getElementById('invite-overlay').classList.add('hidden');
+}
+
+async function inviteToCall(peerId, peerName) {
+  if (!localStream || activeCalls.has(peerId) || activeCalls.size >= MAX_GROUP - 1) return;
+
+  const call = peer.call(peerId, localStream);
+  activeCalls.set(peerId, call);
+  renderParticipants();
+  showToast('Calling ' + peerName + '…');
+
+  const timeout = setTimeout(() => {
+    if (!call.open) {
+      call.close();
+      activeCalls.delete(peerId);
+      renderParticipants();
+      showToast(peerName + ' didn\'t answer.');
+    }
+  }, 40_000);
+
+  attachCallHandlers(call, peerName, timeout);
 }
 
 // ─── Copy my Peer ID ────────────────────────────────────────────────────────
@@ -372,11 +734,84 @@ document.addEventListener('DOMContentLoaded', () => {
   initPeer();
   renderContacts();
 
+  // Initialise toggle states from stored settings
+  syncSettingsToggles();
+
   // Home
   document.getElementById('btn-copy-my-id')
     .addEventListener('click', copyMyId);
   document.getElementById('btn-add-contact')
     .addEventListener('click', () => showScreen('screen-add-contact'));
+  document.getElementById('btn-settings')
+    .addEventListener('click', openSettingsScreen);
+
+  // Settings screen
+  document.getElementById('btn-back-settings')
+    .addEventListener('click', () => showScreen('screen-idle'));
+
+  document.getElementById('select-input-device')
+    .addEventListener('change', async (e) => {
+      const s = loadSettings();
+      s.inputDeviceId = e.target.value;
+      saveSettings(s);
+      await switchMicDevice(e.target.value);
+    });
+
+  document.getElementById('select-output-device')
+    .addEventListener('change', (e) => {
+      const s = loadSettings();
+      s.outputDeviceId = e.target.value;
+      saveSettings(s);
+      applyOutputDevice(e.target.value);
+    });
+
+  // Helper: bind a noise toggle (works for both settings screen and in-call sheet)
+  function bindNoiseToggle(id, key) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', async () => {
+      const s = loadSettings();
+      s[key] = el.checked;
+      saveSettings(s);
+      syncSettingsToggles();   // keep both UIs in sync
+      await applyNoiseConstraints();
+    });
+  }
+
+  bindNoiseToggle('toggle-noise-suppression',       'noiseSuppression');
+  bindNoiseToggle('toggle-echo-cancellation',       'echoCancellation');
+  bindNoiseToggle('toggle-auto-gain',               'autoGainControl');
+  bindNoiseToggle('toggle-noise-suppression-sheet', 'noiseSuppression');
+  bindNoiseToggle('toggle-echo-cancellation-sheet', 'echoCancellation');
+  bindNoiseToggle('toggle-auto-gain-sheet',         'autoGainControl');
+
+  // In-call settings sheet
+  document.getElementById('btn-settings-incall')
+    .addEventListener('click', openSettingsSheet);
+  document.getElementById('btn-close-settings-sheet')
+    .addEventListener('click', closeSettingsSheet);
+  document.getElementById('settings-overlay')
+    .addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) closeSettingsSheet();
+    });
+
+  // Group call bar
+  document.getElementById('btn-group-call')
+    .addEventListener('click', () => {
+      const entries = loadContacts()
+        .filter(c => selectedIds.has(c.id))
+        .map(c => ({ id: c.id, name: c.name }));
+      selectedIds.clear();
+      updateGroupCallBar();
+      renderContacts();
+      startGroupCall(entries);
+    });
+  document.getElementById('btn-clear-selection')
+    .addEventListener('click', () => {
+      selectedIds.clear();
+      updateGroupCallBar();
+      renderContacts();
+    });
 
   // Add Contact screen
   document.getElementById('btn-back-add')
@@ -401,6 +836,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // In-call screen
   document.getElementById('btn-mute')
     .addEventListener('click', toggleMute);
+  document.getElementById('btn-invite')
+    .addEventListener('click', openInviteSheet);
   document.getElementById('btn-hangup')
     .addEventListener('click', hangUp);
+
+  // Invite overlay
+  document.getElementById('invite-overlay')
+    .addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) closeInviteSheet();
+    });
+  document.getElementById('btn-close-invite')
+    .addEventListener('click', closeInviteSheet);
 });
