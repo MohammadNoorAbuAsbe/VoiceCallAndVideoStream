@@ -10,8 +10,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─── Storage keys ────────────────────────────────────────────────────────────
-const KEY_ID       = 'vcall_peer_id';
-const KEY_CONTACTS = 'vcall_contacts';   // JSON: [{id, name, lastCall}]
+const KEY_ID            = 'vcall_peer_id';
+const KEY_CONTACTS      = 'vcall_contacts';    // JSON: [{id, name, lastCall}]
+const KEY_MIC_DEVICE    = 'vcall_mic_device';  // saved audioinput deviceId
+const KEY_OUTPUT_DEVICE = 'vcall_out_device';  // saved audiooutput deviceId
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let peer          = null;   // PeerJS Peer instance
@@ -252,6 +254,53 @@ function initPeer() {
   });
 }
 
+// ─── Device settings helpers ─────────────────────────────────────────────────
+function getMicDeviceId()    { return localStorage.getItem(KEY_MIC_DEVICE)    || ''; }
+function getOutputDeviceId() { return localStorage.getItem(KEY_OUTPUT_DEVICE) || ''; }
+
+/**
+ * Enumerates available audio devices and populates the settings dropdowns.
+ * Requests mic permission first so labels are visible (Chromium requires a
+ * prior permission grant before `label` is non-empty).
+ */
+async function populateDeviceSelects() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    stream.getTracks().forEach(t => t.stop());
+  } catch (_) { /* ignore — labels may be empty but we still enumerate */ }
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const mics    = devices.filter(d => d.kind === 'audioinput');
+  const outputs = devices.filter(d => d.kind === 'audiooutput');
+
+  const micSelect    = document.getElementById('select-mic');
+  const outputSelect = document.getElementById('select-output');
+  const savedMic     = getMicDeviceId();
+  const savedOutput  = getOutputDeviceId();
+
+  micSelect.innerHTML = (mics.length ? mics : []).map((d, i) =>
+    `<option value="${escHtml(d.deviceId)}" ${d.deviceId === savedMic ? 'selected' : ''}>
+      ${escHtml(d.label || 'Microphone ' + (i + 1))}</option>`
+  ).join('');
+  if (!mics.length) micSelect.innerHTML = '<option value="">No microphones found</option>';
+
+  outputSelect.innerHTML = (outputs.length ? outputs : []).map((d, i) =>
+    `<option value="${escHtml(d.deviceId)}" ${d.deviceId === savedOutput ? 'selected' : ''}>
+      ${escHtml(d.label || 'Speaker ' + (i + 1))}</option>`
+  ).join('');
+  if (!outputs.length) outputSelect.innerHTML = '<option value="">No output devices found</option>';
+}
+
+/** Applies the saved output device to the remote-audio element via setSinkId. */
+async function applyOutputDevice() {
+  const audioEl  = document.getElementById('remote-audio');
+  const deviceId = getOutputDeviceId();
+  if (typeof audioEl.setSinkId === 'function' && deviceId) {
+    try { await audioEl.setSinkId(deviceId); }
+    catch (e) { console.warn('setSinkId failed:', e); }
+  }
+}
+
 // ─── RNNoise noise cancellation pipeline ─────────────────────────────────────
 /**
  * Wraps a raw mic MediaStream through an RNNoise AudioWorklet.
@@ -402,9 +451,14 @@ function scheduleReconnect() {
 async function acceptReconnectCall(call, peerName) {
   showReconnectUI('Reconnecting\u2026');
   showScreen('screen-incall');
+  const micDeviceId = getMicDeviceId();
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, autoGainControl: true },
+      audio: {
+        ...(micDeviceId ? { deviceId: { ideal: micDeviceId } } : {}),
+        echoCancellation: true,
+        autoGainControl: true,
+      },
       video: false
     });
   } catch (e) {
@@ -442,6 +496,7 @@ function attachCallHandlers(call, peerName) {
     reconnectAttempts = 0;
     clearReconnectUI();
     document.getElementById('remote-audio').srcObject = remoteStream;
+    applyOutputDevice();
     document.getElementById('incall-peer-name').textContent = peerName;
     touchLastCall(call.peer);
     renderContacts();
@@ -490,9 +545,14 @@ async function startCall(peerId, peerName, isReconnect = false) {
     return;
   }
 
+  const micDeviceId = getMicDeviceId();
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, autoGainControl: true },
+      audio: {
+        ...(micDeviceId ? { deviceId: { ideal: micDeviceId } } : {}),
+        echoCancellation: true,
+        autoGainControl: true,
+      },
       video: false
     });
   } catch (e) {
@@ -543,9 +603,14 @@ async function acceptCall() {
   const call     = activeCall;
   const peerName = document.getElementById('incoming-caller-name').textContent;
 
+  const micDeviceId = getMicDeviceId();
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, autoGainControl: true },
+      audio: {
+        ...(micDeviceId ? { deviceId: { ideal: micDeviceId } } : {}),
+        echoCancellation: true,
+        autoGainControl: true,
+      },
       video: false
     });
   } catch (e) {
@@ -655,6 +720,21 @@ document.addEventListener('DOMContentLoaded', () => {
     .addEventListener('click', copyMyId);
   document.getElementById('btn-add-contact')
     .addEventListener('click', () => showScreen('screen-add-contact'));
+  document.getElementById('btn-open-settings')
+    .addEventListener('click', () => { populateDeviceSelects(); showScreen('screen-settings'); });
+
+  // Settings screen
+  document.getElementById('btn-back-settings')
+    .addEventListener('click', () => showScreen('screen-idle'));
+  document.getElementById('btn-refresh-devices')
+    .addEventListener('click', () => populateDeviceSelects());
+  document.getElementById('select-mic')
+    .addEventListener('change', e => localStorage.setItem(KEY_MIC_DEVICE, e.target.value));
+  document.getElementById('select-output')
+    .addEventListener('change', async e => {
+      localStorage.setItem(KEY_OUTPUT_DEVICE, e.target.value);
+      await applyOutputDevice();
+    });
 
   // Add Contact screen
   document.getElementById('btn-back-add')

@@ -472,3 +472,59 @@ h2 {
 }
 .toast.show  { bottom: 20px; }
 .toast.error { border-color: var(--danger); color: #ff7b7d; }
+
+/* ─── Settings icon button (gear) ─────────────────────────────────────────── */
+.btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px; height: 30px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 50%;
+  transition: color .15s, background .15s;
+  flex-shrink: 0;
+}
+.btn-icon svg { width: 18px; height: 18px; }
+.btn-icon:hover { color: var(--text); background: var(--surface); }
+
+/* ─── Settings screen ─────────────────────────────────────────────────────── */
+#screen-settings { gap: 0; }
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 18px;
+}
+
+.select-device {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.88rem;
+  padding: 10px 12px;
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2372767d' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 32px;
+  transition: border-color .15s;
+}
+.select-device:focus { border-color: var(--accent); }
+.select-device option { background: var(--surface2); }
+
+.settings-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin-top: 2px;
+}
