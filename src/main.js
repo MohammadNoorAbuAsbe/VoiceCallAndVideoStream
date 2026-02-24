@@ -26,9 +26,69 @@ let reconnectTarget   = null;  // {peerId, peerName} — who to call back on an 
 let reconnectAttempts = 0;     // how many auto-reconnect tries we've made so far
 let reconnectTimer    = null;  // setTimeout handle for the next reconnect attempt
 let intentionalHangup = false; // set true when the user deliberately ends the call
+let ringtoneCtx    = null;   // AudioContext used exclusively for ringtone playback
+let ringtoneTimer  = null;   // setInterval handle for repeating the ring
+let ringtoneActive = false;  // guard so we never double-start
+const _originalTitle = document.title; // saved so we can restore it after ringing
 
 const MAX_RECONNECT    = 3;
 const RECONNECT_DELAYS = [2000, 4000, 8000]; // ms — gentle back-off
+
+// ─── Ringtone (Web Audio API — calm chime, works while app is minimised) ──────
+function startRingtone() {
+  if (ringtoneActive) return;
+  ringtoneActive = true;
+  document.title = 'Incoming call…';
+
+  function ringOnce() {
+    if (!ringtoneActive) return;
+    // Create a fresh context every ring so Safari / Tauri WebView stays happy
+    ringtoneCtx = new AudioContext();
+    const ctx = ringtoneCtx;
+    const now = ctx.currentTime;
+
+    // A gentle three-note chime: C5 → E5 → G5
+    const notes = [
+      { freq: 523.25, t: 0.00 },   // C5
+      { freq: 659.25, t: 0.18 },   // E5
+      { freq: 783.99, t: 0.36 },   // G5
+    ];
+
+    notes.forEach(({ freq, t }) => {
+      const osc  = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type            = 'sine';
+      osc.frequency.value = freq;
+      // Soft attack then smooth decay
+      gain.gain.setValueAtTime(0, now + t);
+      gain.gain.linearRampToValueAtTime(0.25, now + t + 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + t + 0.55);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + t);
+      osc.stop(now + t + 0.6);
+    });
+
+    // Repeat the chime every 2.2 seconds
+    ringtoneTimer = setTimeout(() => {
+      if (ringtoneCtx) { try { ringtoneCtx.close(); } catch (_) {} ringtoneCtx = null; }
+      ringOnce();
+    }, 2200);
+  }
+
+  ringOnce();
+}
+
+function stopRingtone() {
+  ringtoneActive = false;
+  clearTimeout(ringtoneTimer);
+  ringtoneTimer = null;
+  if (ringtoneCtx) {
+    try { ringtoneCtx.close(); } catch (_) {}
+    ringtoneCtx = null;
+  }
+  document.title = _originalTitle;
+}
 
 // ─── Contact Book (localStorage) ─────────────────────────────────────────────
 function loadContacts() {
@@ -171,6 +231,7 @@ function initPeer() {
     const callerName = getContactName(incomingCall.peer);
     document.getElementById('incoming-caller-name').textContent = callerName;
     showScreen('screen-incoming');
+    startRingtone();
   });
 
   peer.on('error', (err) => {
@@ -467,6 +528,7 @@ async function startCall(peerId, peerName, isReconnect = false) {
 
 // ─── Accept incoming call ────────────────────────────────────────────────────
 async function acceptCall() {
+  stopRingtone();
   if (!activeCall) return;
   const call     = activeCall;
   const peerName = document.getElementById('incoming-caller-name').textContent;
@@ -499,6 +561,7 @@ async function acceptCall() {
 
 // ─── Reject / cancel ─────────────────────────────────────────────────────────
 function rejectCall() {
+  stopRingtone();
   intentionalHangup = true;
   if (activeCall) { activeCall.close(); activeCall = null; }
   cleanup();
