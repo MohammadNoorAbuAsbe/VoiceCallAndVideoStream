@@ -16,7 +16,8 @@ const KEY_CONTACTS = 'vcall_contacts';   // JSON: [{id, name, lastCall}]
 // ─── State ───────────────────────────────────────────────────────────────────
 let peer          = null;   // PeerJS Peer instance
 let activeCall    = null;   // PeerJS MediaConnection
-let localStream   = null;   // MediaStream from getUserMedia
+let localStream   = null;   // raw MediaStream from getUserMedia (mute control)
+let audioCtx      = null;   // AudioContext for RNNoise pipeline
 let isMuted       = false;
 let callTimerID   = null;
 let callSeconds   = 0;
@@ -172,6 +173,44 @@ function initPeer() {
   });
 }
 
+// ─── RNNoise noise cancellation pipeline ─────────────────────────────────────
+/**
+ * Wraps a raw mic MediaStream through an RNNoise AudioWorklet.
+ * Returns a new MediaStream whose audio has background noise removed.
+ * Falls back to the raw stream if anything goes wrong.
+ */
+async function buildNoiseCancelledStream(rawStream) {
+  // 48 kHz — RNNoise is exclusively trained at this sample rate
+  audioCtx = new AudioContext({ sampleRate: 48000 });
+
+  // Register the worklet (same-origin, no bundler needed)
+  await audioCtx.audioWorklet.addModule('./noise-worklet.js');
+
+  // Fetch the WASM binary as a transferable ArrayBuffer
+  const wasmResp   = await fetch('./assets/rnnoise.wasm');
+  const wasmBinary = await wasmResp.arrayBuffer();
+
+  // Build graph:  mic source → RNNoise worklet → MediaStream destination
+  const source      = audioCtx.createMediaStreamSource(rawStream);
+  const workletNode = new AudioWorkletNode(audioCtx, 'rnnoise-processor');
+  const dest        = audioCtx.createMediaStreamDestination();
+
+  source.connect(workletNode);
+  workletNode.connect(dest);
+
+  // Send WASM buffer to the worklet thread (transferred, not copied)
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('RNNoise init timeout')), 5000);
+    workletNode.port.onmessage = ({ data }) => {
+      if (data.type === 'ready') { clearTimeout(timeout); resolve(); }
+      if (data.type === 'error') { clearTimeout(timeout); reject(new Error(data.message)); }
+    };
+    workletNode.port.postMessage({ type: 'init', wasmBinary }, [wasmBinary]);
+  });
+
+  return dest.stream;
+}
+
 // ─── Mic error handler ───────────────────────────────────────────────────────
 function handleMicError(e) {
   if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
@@ -206,6 +245,7 @@ function cleanup() {
   clearTimeout(callTimeout); callTimeout = null;
   if (activeCall)  { activeCall.close();  activeCall  = null; }
   if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+  if (audioCtx)    { audioCtx.close();    audioCtx    = null; }
   document.getElementById('remote-audio').srcObject = null;
   document.getElementById('call-timer').textContent = '00:00';
   isMuted      = false;
@@ -256,12 +296,21 @@ async function startCall(peerId, peerName) {
 
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      audio: { echoCancellation: true, autoGainControl: true },
       video: false
     });
   } catch (e) {
     handleMicError(e);
     return;
+  }
+
+  // Run RNNoise; fall back to raw mic if WASM fails
+  let callStream = localStream;
+  try {
+    callStream = await buildNoiseCancelledStream(localStream);
+  } catch (e) {
+    console.warn('RNNoise init failed, using raw mic:', e);
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
   }
 
   document.getElementById('calling-peer-name').textContent = peerName;
@@ -270,7 +319,7 @@ async function startCall(peerId, peerName) {
   if (avatar) avatar.textContent = peerName[0]?.toUpperCase() || '?';
   showScreen('screen-calling');
 
-  const call = peer.call(peerId, localStream);
+  const call = peer.call(peerId, callStream);
   activeCall  = call;
 
   // Auto-cancel if no answer in 40 seconds
@@ -292,7 +341,7 @@ async function acceptCall() {
 
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
-      audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      audio: { echoCancellation: true, autoGainControl: true },
       video: false
     });
   } catch (e) {
@@ -303,7 +352,16 @@ async function acceptCall() {
     return;
   }
 
-  call.answer(localStream);
+  // Run RNNoise; fall back to raw mic if WASM fails
+  let callStream = localStream;
+  try {
+    callStream = await buildNoiseCancelledStream(localStream);
+  } catch (e) {
+    console.warn('RNNoise init failed, using raw mic:', e);
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  }
+
+  call.answer(callStream);
   attachCallHandlers(call, peerName);
 }
 
