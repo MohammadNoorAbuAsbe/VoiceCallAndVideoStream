@@ -111,6 +111,11 @@
       <p class="call-status-text">Connected</p>
       <p id="incall-peer-name" class="caller-name">—</p>
       <p class="call-timer" id="call-timer">00:00</p>
+      <!-- Reconnecting overlay — shown automatically on network drop -->
+      <div id="reconnect-overlay" class="reconnect-overlay hidden">
+        <div class="reconnect-spinner"></div>
+        <p id="reconnect-msg">Reconnecting…</p>
+      </div>
     </div>
     <div class="call-controls">
       <div class="btn-circle-wrap">

@@ -22,6 +22,13 @@ let isMuted       = false;
 let callTimerID   = null;
 let callSeconds   = 0;
 let callTimeout   = null;   // auto-cancel timer for unanswered outgoing calls
+let reconnectTarget   = null;  // {peerId, peerName} — who to call back on an unexpected drop
+let reconnectAttempts = 0;     // how many auto-reconnect tries we've made so far
+let reconnectTimer    = null;  // setTimeout handle for the next reconnect attempt
+let intentionalHangup = false; // set true when the user deliberately ends the call
+
+const MAX_RECONNECT    = 3;
+const RECONNECT_DELAYS = [2000, 4000, 8000]; // ms — gentle back-off
 
 // ─── Contact Book (localStorage) ─────────────────────────────────────────────
 function loadContacts() {
@@ -146,6 +153,15 @@ function initPeer() {
 
   // Someone is calling us
   peer.on('call', (incomingCall) => {
+    // Auto-accept a reconnect call from the peer we were just talking to
+    if (reconnectTarget && incomingCall.peer === reconnectTarget.peerId) {
+      clearTimeout(reconnectTimer); reconnectTimer = null;
+      if (activeCall) { try { activeCall.close(); } catch (_) {} activeCall = null; }
+      activeCall = incomingCall;
+      cleanupCallResources();
+      acceptReconnectCall(incomingCall, reconnectTarget.peerName);
+      return;
+    }
     // If already in a call, decline gracefully
     if (activeCall) {
       incomingCall.close();
@@ -240,7 +256,9 @@ function startCallTimer() {
 function stopCallTimer() { clearInterval(callTimerID); callTimerID = null; }
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
-function cleanup() {
+// Tears down mic / audio / call only. Safe to call mid-reconnect — does NOT
+// wipe reconnect state so the retry loop can continue.
+function cleanupCallResources() {
   stopCallTimer();
   clearTimeout(callTimeout); callTimeout = null;
   if (activeCall)  { activeCall.close();  activeCall  = null; }
@@ -248,8 +266,8 @@ function cleanup() {
   if (audioCtx)    { audioCtx.close();    audioCtx    = null; }
   document.getElementById('remote-audio').srcObject = null;
   document.getElementById('call-timer').textContent = '00:00';
-  isMuted      = false;
-  callSeconds  = 0;
+  isMuted     = false;
+  callSeconds = 0;
   // Reset mute button state
   document.getElementById('icon-mic')?.classList.remove('hidden');
   document.getElementById('icon-mic-off')?.classList.add('hidden');
@@ -258,10 +276,100 @@ function cleanup() {
   if (lbl) lbl.textContent = 'Mute';
 }
 
+// Full cleanup — also resets reconnect state. Use for intentional endings.
+function cleanup() {
+  cleanupCallResources();
+  reconnectTarget   = null;
+  reconnectAttempts = 0;
+  clearTimeout(reconnectTimer); reconnectTimer = null;
+  intentionalHangup = false;
+  clearReconnectUI();
+}
+
+// ─── Reconnect UI helpers ─────────────────────────────────────────────────────
+function showReconnectUI(msg) {
+  const overlay = document.getElementById('reconnect-overlay');
+  const msgEl   = document.getElementById('reconnect-msg');
+  if (overlay) overlay.classList.remove('hidden');
+  if (msgEl)   msgEl.textContent = msg;
+  const statusEl = document.querySelector('#screen-incall .call-status-text');
+  if (statusEl)  statusEl.textContent = 'Reconnecting\u2026';
+}
+
+function clearReconnectUI() {
+  const overlay = document.getElementById('reconnect-overlay');
+  if (overlay)  overlay.classList.add('hidden');
+  const statusEl = document.querySelector('#screen-incall .call-status-text');
+  if (statusEl)  statusEl.textContent = 'Connected';
+}
+
+// ─── Auto-reconnect ───────────────────────────────────────────────────────────
+function scheduleReconnect() {
+  if (!reconnectTarget || reconnectAttempts >= MAX_RECONNECT) {
+    const msg = reconnectAttempts >= MAX_RECONNECT
+      ? 'Could not reconnect. Call again when ready.'
+      : 'Connection lost.';
+    showToast(msg, true);
+    cleanup();
+    renderContacts();
+    showScreen('screen-idle');
+    return;
+  }
+
+  const delay = RECONNECT_DELAYS[reconnectAttempts] ?? 8000;
+  reconnectAttempts++;
+  showReconnectUI(`Reconnecting\u2026 (${reconnectAttempts}/${MAX_RECONNECT})`);
+  showScreen('screen-incall');
+
+  reconnectTimer = setTimeout(async () => {
+    if (!reconnectTarget) return; // was cancelled by an intentional hangup
+    await startCall(reconnectTarget.peerId, reconnectTarget.peerName, true);
+  }, delay);
+}
+
+// Accept a reconnect call that the remote peer initiated (they called back first)
+async function acceptReconnectCall(call, peerName) {
+  showReconnectUI('Reconnecting\u2026');
+  showScreen('screen-incall');
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, autoGainControl: true },
+      video: false
+    });
+  } catch (e) {
+    handleMicError(e);
+    call.close(); activeCall = null;
+    return;
+  }
+  let callStream = localStream;
+  try {
+    callStream = await buildNoiseCancelledStream(localStream);
+  } catch (e) {
+    console.warn('RNNoise init failed, using raw mic:', e);
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  }
+  call.answer(callStream);
+  attachCallHandlers(call, peerName);
+}
+
 // ─── Attach handlers to an active call (outgoing OR incoming) ─────────────────
 function attachCallHandlers(call, peerName) {
+  // Guarantee unexpected-drop logic fires at most once per call object
+  let dropHandled = false;
+  function handleUnexpectedDrop() {
+    if (dropHandled || intentionalHangup) return;
+    dropHandled = true;
+    if (activeCall === call) activeCall = null;
+    cleanupCallResources();
+    scheduleReconnect();
+  }
+
   call.on('stream', (remoteStream) => {
     clearTimeout(callTimeout); callTimeout = null;
+    // Record who we're talking to so we can reconnect automatically
+    reconnectTarget   = { peerId: call.peer, peerName };
+    reconnectAttempts = 0;
+    clearReconnectUI();
     document.getElementById('remote-audio').srcObject = remoteStream;
     document.getElementById('incall-peer-name').textContent = peerName;
     touchLastCall(call.peer);
@@ -270,24 +378,41 @@ function attachCallHandlers(call, peerName) {
     showScreen('screen-incall');
   });
 
+  // Monitor WebRTC ICE state — detects silent mid-call drops (e.g. gaming Wi-Fi blip)
+  const pc = call.peerConnection;
+  if (pc) {
+    pc.oniceconnectionstatechange = () => {
+      const s = pc.iceConnectionState;
+      if (s === 'disconnected') {
+        // WebRTC may self-heal; show a soft warning and wait
+        showReconnectUI('Connection unstable\u2026');
+      } else if (s === 'failed') {
+        handleUnexpectedDrop();
+      } else if (s === 'connected' || s === 'completed') {
+        if (!dropHandled) { clearReconnectUI(); reconnectAttempts = 0; }
+      }
+    };
+  }
+
   call.on('close', () => {
-    const wasConnected = document.getElementById('screen-incall').classList.contains('active');
-    cleanup();
-    renderContacts();
-    showScreen('screen-idle');
-    if (wasConnected) showToast('Call ended.');
+    if (intentionalHangup) {
+      const wasConnected = document.getElementById('screen-incall').classList.contains('active');
+      cleanup();
+      renderContacts();
+      showScreen('screen-idle');
+      if (wasConnected) showToast('Call ended.');
+    } else {
+      handleUnexpectedDrop();
+    }
   });
 
-  call.on('error', (err) => {
-    cleanup();
-    renderContacts();
-    showScreen('screen-idle');
-    showToast('Call error: ' + (err.message || String(err)), true);
+  call.on('error', () => {
+    handleUnexpectedDrop();
   });
 }
 
 // ─── Outgoing call ───────────────────────────────────────────────────────────
-async function startCall(peerId, peerName) {
+async function startCall(peerId, peerName, isReconnect = false) {
   if (!peer || peer.disconnected) {
     showToast('Reconnecting to network…', true);
     peer.reconnect();
@@ -313,22 +438,29 @@ async function startCall(peerId, peerName) {
     if (audioCtx) { audioCtx.close(); audioCtx = null; }
   }
 
-  document.getElementById('calling-peer-name').textContent = peerName;
-  // Avatar initial
-  const avatar = document.getElementById('calling-avatar');
-  if (avatar) avatar.textContent = peerName[0]?.toUpperCase() || '?';
-  showScreen('screen-calling');
+  if (isReconnect) {
+    // Stay on the in-call screen — the reconnecting overlay is already visible
+    showReconnectUI(`Reconnecting\u2026 (${reconnectAttempts}/${MAX_RECONNECT})`);
+    showScreen('screen-incall');
+  } else {
+    document.getElementById('calling-peer-name').textContent = peerName;
+    const avatar = document.getElementById('calling-avatar');
+    if (avatar) avatar.textContent = peerName[0]?.toUpperCase() || '?';
+    showScreen('screen-calling');
+  }
 
   const call = peer.call(peerId, callStream);
   activeCall  = call;
 
-  // Auto-cancel if no answer in 40 seconds
-  callTimeout = setTimeout(() => {
-    showToast('No answer.', true);
-    cleanup();
-    renderContacts();
-    showScreen('screen-idle');
-  }, 40_000);
+  // Auto-cancel unanswered outgoing calls (skip for reconnect attempts)
+  if (!isReconnect) {
+    callTimeout = setTimeout(() => {
+      showToast('No answer.', true);
+      cleanup();
+      renderContacts();
+      showScreen('screen-idle');
+    }, 40_000);
+  }
 
   attachCallHandlers(call, peerName);
 }
@@ -367,12 +499,14 @@ async function acceptCall() {
 
 // ─── Reject / cancel ─────────────────────────────────────────────────────────
 function rejectCall() {
+  intentionalHangup = true;
   if (activeCall) { activeCall.close(); activeCall = null; }
   cleanup();
   showScreen('screen-idle');
 }
 
 function cancelCall() {
+  intentionalHangup = true;
   cleanup();
   showScreen('screen-idle');
 }
@@ -389,6 +523,7 @@ function toggleMute() {
 
 // ─── In-call: hang up ────────────────────────────────────────────────────────
 function hangUp() {
+  intentionalHangup = true;
   cleanup();
   renderContacts();
   showScreen('screen-idle');

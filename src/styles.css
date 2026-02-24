@@ -425,6 +425,32 @@ h2 {
 .btn-circle.hangup { background: var(--danger); color: #fff; }
 .btn-circle.hangup:hover { background: var(--danger-h); }
 
+/* ─── Reconnecting overlay (inside .call-card on in-call screen) ──────────── */
+.reconnect-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 17, 23, .85);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: var(--radius);
+  z-index: 10;
+}
+.reconnect-overlay p {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  letter-spacing: .2px;
+}
+.reconnect-spinner {
+  width: 24px; height: 24px;
+  border: 2.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .75s linear infinite;
+}
+
 /*  Toast  */
 .toast {
   position: fixed;
