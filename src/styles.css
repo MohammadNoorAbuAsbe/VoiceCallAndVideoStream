@@ -427,9 +427,9 @@ h2 {
 .btn-circle:hover { background: var(--border); }
 .btn-circle:active { transform: scale(.93); }
 .btn-circle.muted { background: #2c1f1f; color: var(--danger); }
-.btn-circle.hangup { background: var(--danger); color: #fff; }
 .btn-circle.hangup:hover { background: var(--danger-h); }
 
+<<<<<<< Updated upstream
 /* ─── Contact checkbox ────────────────────────────────────────────────────── */
 .contact-check-wrap {
   display: flex;
@@ -585,6 +585,57 @@ h2 {
   color: var(--text-muted);
   padding: 12px 0;
   text-align: center;
+=======
+/* ─── Noise-Cancel row (in-call screen) ────────────────────────────────── */
+.nc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 9px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: 100%;
+  max-width: 260px;
+}
+.nc-row svg   { width: 15px; height: 15px; flex-shrink: 0; color: var(--text-muted); }
+.nc-label     { flex: 1; font-size: 0.78rem; font-weight: 500; color: var(--text-muted); }
+
+/* iOS-style pill toggle */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.toggle-switch input {
+  opacity: 0;
+  width: 0; height: 0;
+  position: absolute;
+}
+.toggle-track {
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+  border-radius: 20px;
+  transition: background .2s;
+}
+.toggle-switch input:checked + .toggle-track { background: var(--accent); }
+.toggle-thumb {
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 14px; height: 14px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform .2s;
+  pointer-events: none;
+}
+.toggle-switch input:checked + .toggle-track .toggle-thumb {
+  transform: translateX(16px);
+>>>>>>> Stashed changes
 }
 
 /*  Toast  */

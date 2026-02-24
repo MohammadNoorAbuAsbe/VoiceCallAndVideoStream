@@ -25,6 +25,16 @@ let isMuted      = false;
 let callTimerID  = null;
 let callSeconds  = 0;
 
+// ─── RNNoise / ML Noise Cancellation ─────────────────────────────────────────
+const KEY_NC          = 'vcall_nc';    // 'true' | 'false'
+let ncEnabled         = localStorage.getItem(KEY_NC) !== 'false';  // default ON
+let wasmBinary        = null;          // cached rnnoise.wasm ArrayBuffer
+let audioCtx          = null;          // one AudioContext reused across calls
+let workletAdded      = false;         // audioWorklet.addModule called?
+let workletNode       = null;          // AudioWorkletNode for active call
+let audioSrc          = null;          // MediaStreamSourceNode for active call
+let processedStream   = null;          // clean stream → passed to PeerJS
+
 // ─── Contact Book (localStorage) ─────────────────────────────────────────────
 function loadContacts() {
   try { return JSON.parse(localStorage.getItem(KEY_CONTACTS) || '[]'); }
@@ -51,6 +61,7 @@ function getContactName(id) {
   return c ? c.name : id.slice(0, 10) + '…';
 }
 
+<<<<<<< Updated upstream
 // ─── Settings ─────────────────────────────────────────────────────────────────
 function loadSettings() {
   try { return JSON.parse(localStorage.getItem(KEY_SETTINGS) || '{}'); }
@@ -181,6 +192,97 @@ function openSettingsScreen() {
   populateDeviceDropdowns();
   syncSettingsToggles();
   showScreen('screen-settings');
+=======
+// ─── RNNoise helpers ─────────────────────────────────────────────────────────
+
+// Fetch and cache rnnoise.wasm at startup (no AudioContext needed yet)
+async function preloadWasm() {
+  try {
+    const res = await fetch('rnnoise.wasm');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    wasmBinary = await res.arrayBuffer();
+  } catch (e) {
+    console.warn('[NC] rnnoise.wasm not available — ML noise cancel disabled.', e);
+  }
+}
+
+// Build AudioContext → AudioWorklet → return a denoised MediaStream.
+// Falls back to rawStream on any error so calling always works.
+async function buildRNNoiseGraph(rawStream) {
+  if (!wasmBinary) return rawStream;
+  try {
+    // Create (or reuse) AudioContext
+    if (!audioCtx || audioCtx.state === 'closed') {
+      audioCtx    = new AudioContext({ sampleRate: 48000 });
+      workletAdded = false;
+    }
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    // Register the worklet module once per AudioContext instance
+    if (!workletAdded) {
+      await audioCtx.audioWorklet.addModule('noise-worklet.js');
+      workletAdded = true;
+    }
+
+    teardownRNNoiseGraph(); // disconnect any leftover graph from previous call
+
+    audioSrc    = audioCtx.createMediaStreamSource(rawStream);
+    workletNode = new AudioWorkletNode(audioCtx, 'rnnoise-processor', {
+      numberOfInputs:    1,
+      numberOfOutputs:   1,
+      outputChannelCount: [1],
+    });
+    const dest = audioCtx.createMediaStreamDestination();
+
+    // Clone the cached binary (postMessage without transfer list copies it)
+    workletNode.port.postMessage({ type: 'init', wasmBinary });
+
+    audioSrc.connect(workletNode);
+    workletNode.connect(dest);
+    processedStream = dest.stream;
+    return processedStream;
+  } catch (e) {
+    console.error('[NC] Audio graph error — falling back to raw stream.', e);
+    teardownRNNoiseGraph();
+    return rawStream;
+  }
+}
+
+// Disconnect and release all Web Audio nodes for the current call
+function teardownRNNoiseGraph() {
+  if (workletNode) { try { workletNode.disconnect(); } catch {} workletNode = null; }
+  if (audioSrc)    { try { audioSrc.disconnect();    } catch {} audioSrc    = null; }
+  processedStream = null;
+}
+
+// Sync the checkbox to the current ncEnabled state
+function updateNCUI() {
+  const chk = document.getElementById('chk-rnnoise');
+  if (chk) chk.checked = ncEnabled;
+}
+
+// Toggle ML noise cancellation; hot-swaps the audio track mid-call if active
+async function toggleNC(checked) {
+  ncEnabled = (typeof checked === 'boolean') ? checked : !ncEnabled;
+  localStorage.setItem(KEY_NC, String(ncEnabled));
+  updateNCUI();
+
+  if (!activeCall?.peerConnection) return;  // no active call — just saved pref
+
+  const sender = activeCall.peerConnection
+    .getSenders().find(s => s.track?.kind === 'audio');
+  if (!sender) return;
+
+  if (ncEnabled) {
+    const processed = await buildRNNoiseGraph(localStream);
+    const track = processed?.getAudioTracks()[0];
+    if (track) await sender.replaceTrack(track).catch(console.warn);
+  } else {
+    const rawTrack = localStream?.getAudioTracks()[0];
+    if (rawTrack) await sender.replaceTrack(rawTrack).catch(console.warn);
+    teardownRNNoiseGraph();
+  }
+>>>>>>> Stashed changes
 }
 
 // ─── UI helpers ──────────────────────────────────────────────────────────────
@@ -441,8 +543,14 @@ function stopCallTimer() { clearInterval(callTimerID); callTimerID = null; }
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 function cleanup() {
   stopCallTimer();
+<<<<<<< Updated upstream
   activeCalls.forEach(c => { try { c.close(); } catch (_) {} });
   activeCalls.clear();
+=======
+  clearTimeout(callTimeout); callTimeout = null;
+  teardownRNNoiseGraph();
+  if (activeCall)  { activeCall.close();  activeCall  = null; }
+>>>>>>> Stashed changes
   if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
   // Remove all dynamic audio elements
   const container = document.getElementById('audio-container');
@@ -529,8 +637,14 @@ async function startCall(peerId, peerName) {
   if (avatar) avatar.textContent = peerName[0]?.toUpperCase() || '?';
   showScreen('screen-calling');
 
+<<<<<<< Updated upstream
   const call     = peer.call(peerId, localStream);
   activeCalls.set(peerId, call);
+=======
+  const streamForCall = ncEnabled ? await buildRNNoiseGraph(localStream) : localStream;
+  const call = peer.call(peerId, streamForCall);
+  activeCall  = call;
+>>>>>>> Stashed changes
 
   const timeout = setTimeout(() => {
     showToast('No answer.', true);
@@ -607,7 +721,8 @@ async function acceptCall() {
     return;
   }
 
-  call.answer(localStream);
+  const streamForCall = ncEnabled ? await buildRNNoiseGraph(localStream) : localStream;
+  call.answer(streamForCall);
   attachCallHandlers(call, peerName);
 }
 
@@ -733,6 +848,11 @@ function saveContact() {
 document.addEventListener('DOMContentLoaded', () => {
   initPeer();
   renderContacts();
+  preloadWasm();
+  updateNCUI();
+
+  document.getElementById('chk-rnnoise')
+    .addEventListener('change', e => toggleNC(e.target.checked));
 
   // Initialise toggle states from stored settings
   syncSettingsToggles();

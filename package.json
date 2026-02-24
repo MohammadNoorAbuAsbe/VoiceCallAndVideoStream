@@ -8,5 +8,8 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2"
+  },
+  "dependencies": {
+    "@jitsi/rnnoise-wasm": "^0.2.1"
   }
 }

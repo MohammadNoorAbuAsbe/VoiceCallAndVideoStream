@@ -225,6 +225,21 @@
         <span class="btn-circle-label">Hang Up</span>
       </div>
     </div>
+
+    <!--  Noise-cancel toggle (matches the builtin noiseSuppression row style)  -->
+    <div class="nc-row">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
+        <path d="M9 9H5m14 0h-4"/>
+        <line x1="1" y1="1" x2="3" y2="3" style="display:none"/>
+      </svg>
+      <span class="nc-label">ML Noise Cancel</span>
+      <label class="toggle-switch" title="RNNoise neural-network noise suppression (≈112 KB WASM)">
+        <input type="checkbox" id="chk-rnnoise">
+        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+      </label>
+    </div>
   </section>
 
   <!--  Invite overlay (slide-up sheet shown while in-call)  -->
