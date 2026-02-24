@@ -18,8 +18,10 @@ let peer          = null;   // PeerJS Peer instance
 let activeCall    = null;   // PeerJS MediaConnection
 let localStream   = null;   // raw MediaStream from getUserMedia (mute control)
 let audioCtx      = null;   // AudioContext for RNNoise pipeline
-let isMuted       = false;
-let callTimerID   = null;
+let isMuted                  = false;
+let noiseCancellationEnabled = true;
+let noiseWorkletNode         = null;
+let callTimerID              = null;
 let callSeconds   = 0;
 let callTimeout   = null;   // auto-cancel timer for unanswered outgoing calls
 let reconnectTarget   = null;  // {peerId, peerName} — who to call back on an unexpected drop
@@ -275,6 +277,9 @@ async function buildNoiseCancelledStream(rawStream) {
   source.connect(workletNode);
   workletNode.connect(dest);
 
+  // Keep a reference so we can toggle bypass mid-call
+  noiseWorkletNode = workletNode;
+
   // Send WASM buffer to the worklet thread (transferred, not copied)
   await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('RNNoise init timeout')), 5000);
@@ -327,14 +332,19 @@ function cleanupCallResources() {
   if (audioCtx)    { audioCtx.close();    audioCtx    = null; }
   document.getElementById('remote-audio').srcObject = null;
   document.getElementById('call-timer').textContent = '00:00';
-  isMuted     = false;
-  callSeconds = 0;
+  isMuted          = false;
+  noiseWorkletNode = null;
+  callSeconds      = 0;
   // Reset mute button state
   document.getElementById('icon-mic')?.classList.remove('hidden');
   document.getElementById('icon-mic-off')?.classList.add('hidden');
   document.getElementById('btn-mute')?.classList.remove('muted');
-  const lbl = document.querySelector('#btn-mute + .btn-circle-label, #btn-mute ~ span');
-  if (lbl) lbl.textContent = 'Mute';
+  const muteLbl = document.querySelector('#btn-mute + .btn-circle-label, #btn-mute ~ span');
+  if (muteLbl) muteLbl.textContent = 'Mute';
+  // Reset NC button state (keep user preference — don't reset noiseCancellationEnabled)
+  document.getElementById('btn-noise-cancel')?.classList.toggle('nc-off', !noiseCancellationEnabled);
+  const ncLbl = document.querySelector('#btn-noise-cancel ~ .btn-circle-label, #btn-noise-cancel + .btn-circle-label');
+  if (ncLbl) ncLbl.textContent = noiseCancellationEnabled ? 'Noise Cancel' : 'Noise Cancel';
 }
 
 // Full cleanup — also resets reconnect state. Use for intentional endings.
@@ -574,6 +584,18 @@ function cancelCall() {
   showScreen('screen-idle');
 }
 
+// ─── In-call: noise cancellation toggle ─────────────────────────────────────
+function toggleNoiseCancellation() {
+  noiseCancellationEnabled = !noiseCancellationEnabled;
+  const btn = document.getElementById('btn-noise-cancel');
+  btn?.classList.toggle('nc-off', !noiseCancellationEnabled);
+  // Tell the worklet to bypass or re-enable processing
+  if (noiseWorkletNode) {
+    noiseWorkletNode.port.postMessage({ type: 'bypass', value: !noiseCancellationEnabled });
+  }
+  showToast(noiseCancellationEnabled ? 'Noise cancellation on.' : 'Noise cancellation off.');
+}
+
 // ─── In-call: mute ───────────────────────────────────────────────────────────
 function toggleMute() {
   if (!localStream) return;
@@ -657,6 +679,8 @@ document.addEventListener('DOMContentLoaded', () => {
   // In-call screen
   document.getElementById('btn-mute')
     .addEventListener('click', toggleMute);
+  document.getElementById('btn-noise-cancel')
+    .addEventListener('click', toggleNoiseCancellation);
   document.getElementById('btn-hangup')
     .addEventListener('click', hangUp);
 });

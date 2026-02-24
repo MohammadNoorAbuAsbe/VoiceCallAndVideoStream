@@ -421,7 +421,8 @@ h2 {
 .btn-circle svg   { width: 26px; height: 26px; }
 .btn-circle:hover { background: var(--border); }
 .btn-circle:active { transform: scale(.93); }
-.btn-circle.muted { background: #2c1f1f; color: var(--danger); }
+.btn-circle.muted  { background: #2c1f1f; color: var(--danger); }
+.btn-circle.nc-off { background: #2a2716; color: #c9a227; }
 .btn-circle.hangup { background: var(--danger); color: #fff; }
 .btn-circle.hangup:hover { background: var(--danger-h); }
 

@@ -40,8 +40,11 @@ class RNNoiseProcessor extends AudioWorkletProcessor {
     this._outRead  = 0;
     this._outAvail = 0;
 
+    this._bypass = false;
+
     this.port.onmessage = ({ data }) => {
-      if (data.type === 'init') this._load(data.wasmBinary);
+      if (data.type === 'init')   this._load(data.wasmBinary);
+      if (data.type === 'bypass') this._bypass = data.value;
     };
   }
 
@@ -122,6 +125,12 @@ class RNNoiseProcessor extends AudioWorkletProcessor {
     if (!out) return true;
 
     const src = inp ?? new Float32Array(QSIZE);
+
+    // Pass-through while bypassed (noise cancellation toggled off)
+    if (this._bypass) {
+      out.set(src);
+      return true;
+    }
 
     // Pass-through while WASM loads (typically < 50 ms at startup)
     if (!this._ready) {
