@@ -528,3 +528,34 @@ h2 {
   line-height: 1.5;
   margin-top: 2px;
 }
+
+/* ─── Keybind row ─────────────────────────────────────────────────────────── */
+.keybind-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.keybind-display {
+  flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 0.82rem;
+  color: var(--accent);
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  transition: border-color .15s;
+}
+.keybind-display.listening {
+  border-color: var(--accent);
+  color: var(--text-muted);
+  animation: keybind-pulse 1s ease-in-out infinite;
+}
+@keyframes keybind-pulse {
+  0%, 100% { border-color: var(--accent); }
+  50%       { border-color: var(--border); }
+}

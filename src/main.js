@@ -14,6 +14,7 @@ const KEY_ID            = 'vcall_peer_id';
 const KEY_CONTACTS      = 'vcall_contacts';    // JSON: [{id, name, lastCall}]
 const KEY_MIC_DEVICE    = 'vcall_mic_device';  // saved audioinput deviceId
 const KEY_OUTPUT_DEVICE = 'vcall_out_device';  // saved audiooutput deviceId
+const KEY_MUTE_KEYBIND  = 'vcall_mute_key';    // JSON: {code, ctrl, shift, alt, meta}
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let peer          = null;   // PeerJS Peer instance
@@ -257,6 +258,98 @@ function initPeer() {
 // ─── Device settings helpers ─────────────────────────────────────────────────
 function getMicDeviceId()    { return localStorage.getItem(KEY_MIC_DEVICE)    || ''; }
 function getOutputDeviceId() { return localStorage.getItem(KEY_OUTPUT_DEVICE) || ''; }
+
+// ─── Mute keybind helpers ─────────────────────────────────────────────────────
+function getMuteKeybind() {
+  try { return JSON.parse(localStorage.getItem(KEY_MUTE_KEYBIND) || 'null'); }
+  catch { return null; }
+}
+function setMuteKeybind(kb) {
+  if (kb) localStorage.setItem(KEY_MUTE_KEYBIND, JSON.stringify(kb));
+  else    localStorage.removeItem(KEY_MUTE_KEYBIND);
+}
+
+// Map KeyboardEvent.code → a nicer label for display
+const _codeLabels = {
+  Space:'Space', Backquote:'`', Minus:'-', Equal:'=', BracketLeft:'[', BracketRight:']',
+  Backslash:'\\', Semicolon:';', Quote:"'", Comma:',', Period:'.', Slash:'/',
+  Backspace:'Backspace', Tab:'Tab', CapsLock:'Caps', Enter:'Enter', Escape:'Esc',
+  Delete:'Del', Insert:'Ins', Home:'Home', End:'End', PageUp:'PgUp', PageDown:'PgDn',
+  ArrowUp:'↑', ArrowDown:'↓', ArrowLeft:'←', ArrowRight:'→',
+  PrintScreen:'PrtSc', ScrollLock:'ScrLk', Pause:'Pause', NumLock:'NumLk',
+};
+for (let i = 1; i <= 12; i++) _codeLabels['F' + i] = 'F' + i;
+for (let i = 0; i <= 9; i++)  _codeLabels['Digit' + i] = String(i);
+for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') _codeLabels['Key' + c] = c;
+
+function formatKeybind(kb) {
+  if (!kb) return 'None';
+  const parts = [];
+  if (kb.ctrl)  parts.push('Ctrl');
+  if (kb.shift) parts.push('Shift');
+  if (kb.alt)   parts.push('Alt');
+  if (kb.meta)  parts.push('Meta');
+  parts.push(_codeLabels[kb.code] || kb.code);
+  return parts.join('+');
+}
+
+function updateKeybindDisplay() {
+  const el = document.getElementById('keybind-display');
+  if (!el) return;
+  const kb = getMuteKeybind();
+  el.textContent = formatKeybind(kb);
+  el.classList.remove('listening');
+}
+
+let _keybindCapturing = false;
+
+function startKeybindCapture() {
+  if (_keybindCapturing) return;
+  _keybindCapturing = true;
+
+  const display = document.getElementById('keybind-display');
+  const btn     = document.getElementById('btn-set-keybind');
+  display.textContent = 'Press a key…';
+  display.classList.add('listening');
+  btn.textContent = 'Cancel';
+
+  function onKey(e) {
+    // Pure modifier keys alone are not valid keybinds
+    if (['Control','Shift','Alt','Meta'].includes(e.key)) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+
+    stopCapture();
+
+    if (e.key === 'Escape') {
+      // Escape cancels — restore previous display without saving
+      updateKeybindDisplay();
+      return;
+    }
+
+    const kb = {
+      code:  e.code,
+      ctrl:  e.ctrlKey,
+      shift: e.shiftKey,
+      alt:   e.altKey,
+      meta:  e.metaKey,
+    };
+    setMuteKeybind(kb);
+    updateKeybindDisplay();
+    showToast('Keybind set to ' + formatKeybind(kb) + '.');
+  }
+
+  function stopCapture() {
+    _keybindCapturing = false;
+    document.removeEventListener('keydown', onKey, true);
+    const b = document.getElementById('btn-set-keybind');
+    if (b) b.textContent = 'Set';
+    const d = document.getElementById('keybind-display');
+    if (d) d.classList.remove('listening');
+  }
+
+  document.addEventListener('keydown', onKey, true); // capture phase — fires before anything else
+}
 
 /**
  * Enumerates available audio devices and populates the settings dropdowns.
@@ -710,6 +803,33 @@ function saveContact() {
   showToast(name + ' added to contacts.');
 }
 
+// ─── Global mute keybind listener ─────────────────────────────────────────────
+document.addEventListener('keydown', (e) => {
+  // Ignore when the user is typing in an input field
+  const tag = document.activeElement?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  // Ignore during capture mode
+  if (_keybindCapturing) return;
+
+  const kb = getMuteKeybind();
+  if (!kb) return;
+
+  if (
+    e.code     === kb.code  &&
+    e.ctrlKey  === kb.ctrl  &&
+    e.shiftKey === kb.shift &&
+    e.altKey   === kb.alt   &&
+    e.metaKey  === kb.meta
+  ) {
+    e.preventDefault();
+    toggleMute();
+    // Show a brief toast only when not on the in-call screen
+    if (!document.getElementById('screen-incall')?.classList.contains('active')) {
+      showToast(isMuted ? 'Mic muted.' : 'Mic unmuted.');
+    }
+  }
+});
+
 // ─── Init ────────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   initPeer();
@@ -721,7 +841,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('btn-add-contact')
     .addEventListener('click', () => showScreen('screen-add-contact'));
   document.getElementById('btn-open-settings')
-    .addEventListener('click', () => { populateDeviceSelects(); showScreen('screen-settings'); });
+    .addEventListener('click', () => { populateDeviceSelects(); updateKeybindDisplay(); showScreen('screen-settings'); });
 
   // Settings screen
   document.getElementById('btn-back-settings')
@@ -735,6 +855,20 @@ document.addEventListener('DOMContentLoaded', () => {
       localStorage.setItem(KEY_OUTPUT_DEVICE, e.target.value);
       await applyOutputDevice();
     });
+  document.getElementById('btn-set-keybind')
+    .addEventListener('click', () => {
+      if (_keybindCapturing) {
+        // second click = cancel
+        document.getElementById('btn-set-keybind').textContent = 'Set';
+        document.getElementById('keybind-display').classList.remove('listening');
+        _keybindCapturing = false;
+        updateKeybindDisplay();
+      } else {
+        startKeybindCapture();
+      }
+    });
+  document.getElementById('btn-clear-keybind')
+    .addEventListener('click', () => { setMuteKeybind(null); updateKeybindDisplay(); showToast('Keybind cleared.'); });
 
   // Add Contact screen
   document.getElementById('btn-back-add')
