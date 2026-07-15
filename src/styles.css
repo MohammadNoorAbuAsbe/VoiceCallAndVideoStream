@@ -556,6 +556,32 @@ h2 {
   animation: keybind-pulse 1s ease-in-out infinite;
 }
 @keyframes keybind-pulse {
-  0%, 100% { border-color: var(--accent); }
-  50%       { border-color: var(--border); }
+   0%, 100% { border-color: var(--accent); }
+   50%       { border-color: var(--border); }
 }
+
+/* ─── Relay status pill ─────────────────────────────────────────────────────── */
+.relay-status {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  align-self: flex-start;
+  letter-spacing: .3px;
+}
+.relay-status.online  { background: rgba(59,165,92,.15); color: var(--success); }
+.relay-status.offline { background: rgba(237,66,69,.12); color: var(--danger); }
+
+/* ─── Remote mute indicator (in-call) ────────────────────────────────────────── */
+.remote-mute {
+  font-size: 0.75rem;
+  color: var(--danger);
+  min-height: 1em;
+  font-weight: 600;
+  letter-spacing: .3px;
+}
+
+/* ─── Enable-sound fallback button (in-call) ────────────────────────────────── */
+#btn-enable-sound { animation: fadeIn .2s ease; }

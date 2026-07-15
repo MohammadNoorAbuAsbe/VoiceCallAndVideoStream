@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "relay": "cd server && npm install && npm start"
   },
   "devDependencies": {
     "@jitsi/rnnoise-wasm": "^0.2.1",

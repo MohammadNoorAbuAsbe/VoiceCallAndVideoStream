@@ -38,8 +38,9 @@
         </div>
         <button class="btn btn-copy btn-sm" id="btn-copy-my-id">Copy</button>
       </div>
-      <p class="id-hint">Share your ID with friends so they can call you. You only do this once.</p>
-    </div>
+        <p class="id-hint">Share your ID with friends so they can call you. You only do this once.</p>
+        <span id="relay-status" class="relay-status offline">Relay: —</span>
+      </div>
 
     <div class="contacts-header">
       <span class="contacts-title">Contacts</span>
@@ -67,6 +68,15 @@
   <section id="screen-settings" class="screen">
     <button class="btn-back" id="btn-back-settings">&#8592; Back</button>
     <h2>Settings</h2>
+
+    <div class="settings-section">
+      <label class="field-label" for="relay-url-input">Relay Server URL</label>
+      <input id="relay-url-input" class="text-input" type="text" placeholder="wss://your-relay.example.com" autocomplete="off" spellcheck="false" />
+      <label class="field-label" style="margin-top:12px;" for="relay-token-input">Relay Token (optional)</label>
+      <input id="relay-token-input" class="text-input" type="text" placeholder="leave blank if none" autocomplete="off" />
+      <button id="btn-save-relay" class="btn btn-secondary full-width" style="margin-top:14px;">Save &amp; Reconnect</button>
+      <p class="settings-hint">The WebSocket relay forwards audio between peers. Set this to your hosted <code>wss://</code> URL.</p>
+    </div>
 
     <div class="settings-section">
       <label class="field-label" for="select-mic">Microphone (Input)</label>
@@ -156,12 +166,14 @@
       </div>
       <p class="call-status-text">Connected</p>
       <p id="incall-peer-name" class="caller-name">—</p>
+      <p class="remote-mute" id="incall-remote-mute"></p>
       <p class="call-timer" id="call-timer">00:00</p>
       <!-- Reconnecting overlay — shown automatically on network drop -->
       <div id="reconnect-overlay" class="reconnect-overlay hidden">
         <div class="reconnect-spinner"></div>
         <p id="reconnect-msg">Reconnecting…</p>
       </div>
+      <button id="btn-enable-sound" class="btn btn-secondary hidden" style="margin-top:14px;">Tap to enable sound</button>
     </div>
     <div class="call-controls">
       <div class="btn-circle-wrap">
@@ -206,11 +218,10 @@
     </div>
   </section>
 
-  <!--  Hidden audio element for remote stream  -->
+  <!--  Hidden audio element (audio is rendered through this for output-device support)  -->
   <audio id="remote-audio" autoplay playsinline></audio>
 
-  <!--  PeerJS (handles WebRTC signaling automatically)  -->
-  <script src="peerjs.min.js"></script>
-  <script src="main.js"></script>
+  <!--  App (relay-based; no PeerJS / WebRTC)  -->
+  <script type="module" src="main.js"></script>
 </body>
 </html>

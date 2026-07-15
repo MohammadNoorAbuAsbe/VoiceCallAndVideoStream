@@ -1,0 +1,13 @@
+{
+  "name": "voicecall-relay",
+  "version": "1.0.0",
+  "description": "WebSocket relay server for VoiceCall (signaling + audio forwarding, no ICE/TURN)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
