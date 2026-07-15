@@ -17,7 +17,7 @@ const KEY_RELAY_URL     = 'vcall_relay_url';
 const KEY_RELAY_TOKEN   = 'vcall_relay_token';
 
 // Bake your deployed wss:// URL here so users never have to set it.
-const DEFAULT_RELAY_URL = '';
+const DEFAULT_RELAY_URL = 'wss://voicecallandvideostream.onrender.com';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 import { RelayClient } from './relay.js';
