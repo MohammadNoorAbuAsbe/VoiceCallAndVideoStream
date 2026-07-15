@@ -1,39 +1,60 @@
 /**
  * Capture AudioWorklet Processor
  *
- * Captures the microphone, runs RNNoise (optional) and posts 480-sample
- * Float32 frames (10 ms @ 48 kHz) to the main thread. The main thread
- * downsamples to 16 kHz and ships the PCM over the relay.
+ * Captures the microphone, runs SpeexDSP noise suppression (optional) and posts
+ * 480-sample Float32 frames (10 ms @ 48 kHz) to the main thread. The main thread
+ * ships the PCM over the relay verbatim (no resampling).
  *
- * WASM export map (from @jitsi/rnnoise-wasm dist/rnnoise.js, v0.0.1):
- *   c = WebAssembly.Memory | d = __wasm_call_ctors | e = rnnoise_init
- *   f = rnnoise_create      | g = malloc           | h = rnnoise_destroy
- *   i = free                | j = rnnoise_process_frame
+ * Why SpeexDSP (not RNNoise / not browser-native):
+ *   - RNNoise (2018) has a characteristic "wind/airy" artifact on full-band 48 kHz.
+ *   - Browser-native suppression varies per browser and was the weak link before.
+ *   SpeexDSP's preprocess does noise suppression + residual-echo suppression +
+ *   AGC in one mature, low-CPU module and operates directly on int16 PCM.
+ *
+ * WASM export map (from @sapphi-red/speex-preprocess-wasm dist/speex.wasm):
+ *   e = memory
+ *   f = ___wasm_call_ctors
+ *   g = _speex_preprocess_state_init(frameSize, samplingRate)
+ *   h = _speex_preprocess_state_destroy(state)
+ *   i = _speex_preprocess_run(state, ptr)        // in-place int16
+ *   j = _speex_preprocess_ctl(state, request, ptr)
+ *   k = _free(ptr)
+ *   l = _malloc(size)
+ *
+ * WASM import map (module "a"):
+ *   a = _fd_write   b = _fd_seek   c = _fd_close   d = _emscripten_resize_heap
  */
 
-const FRAME   = 480;   // 48 kHz × 10 ms — RNNoise native frame
+const FRAME   = 480;   // 48 kHz × 10 ms — Speex native frame
 const QSIZE   = 128;   // Web Audio render quantum
-const SCALE   = 32768;
-const RINGLEN = FRAME * 4;
+
+// SpeexPreprocessCtlRequest subset we use.
+const CTL = {
+  SET_DENOISE: 0,
+  SET_AGC: 2,
+  SET_VAD: 4,
+  SET_NOISE_SUPPRESS: 18,
+  SET_ECHO_SUPPRESS: 20,
+  SET_AGC_MAX_GAIN: 30
+};
 
 class CaptureProcessor extends AudioWorkletProcessor {
   constructor () {
     super();
     this._ready = false;
 
-    // RNNoise input accumulator + output ring
+    // Speex input accumulator (Float32)
     this._inBuf   = new Float32Array(FRAME);
     this._inCount = 0;
-    this._outRing  = new Float32Array(RINGLEN);
-    this._outWrite = 0;
-    this._outRead  = 0;
-    this._outAvail = 0;
 
-    // Raw (un-denoised) accumulator used before RNNoise is ready or when bypassed
+    // Raw (un-denoised) accumulator used before Speex is ready or when bypassed
     this._rawBuf   = new Float32Array(FRAME);
     this._rawCount = 0;
 
     this._bypass = false;
+    this._state  = null;
+    this._bufPtr = 0;
+    this._ctlPtr = 0;
 
     this.port.onmessage = ({ data }) => {
       if (data.type === 'init')   this._load(data.wasmBinary);
@@ -43,31 +64,51 @@ class CaptureProcessor extends AudioWorkletProcessor {
 
   async _load (wasmBinary) {
     try {
-      let memory = null;
+      const self = this;
       const imports = {
         a: {
-          a: (requestedSize) => {
-            try {
-              const pages = Math.ceil((requestedSize - memory.buffer.byteLength) / 65536);
-              if (pages > 0) memory.grow(pages);
-              return 1;
-            } catch { return 0; }
+          // _fd_write — ignore stdout/stderr (Speex does no real I/O).
+          a (fd, iov, iovcnt, pnum) {
+            let total = 0;
+            const dv = new DataView(self._memory.buffer);
+            for (let k = 0; k < iovcnt; k++) {
+              const len = dv.getUint32(iov + k * 8 + 4, true);
+              total += len;
+            }
+            dv.setUint32(pnum, total, true);
+            return 0;
           },
-          b: (dst, src, n) => {
-            new Uint8Array(memory.buffer).copyWithin(dst, src, src + n);
+          b () { return 0; },            // _fd_seek
+          c () { return 0; },            // _fd_close
+          d (requestedSize) {            // _emscripten_resize_heap
+            const cur = self._memory.buffer.byteLength;
+            if (requestedSize <= cur) return 1;
+            const pages = Math.ceil((requestedSize - cur) / 65536);
+            try { self._memory.grow(pages); return 1; } catch { return 0; }
           }
         }
       };
+
       const { instance } = await WebAssembly.instantiate(wasmBinary, imports);
       const exp = instance.exports;
-      memory = exp.c;
-      if (typeof exp.d === 'function') exp.d();
-      this._state  = exp.f(0);
-      this._inPtr  = exp.g(FRAME * 4);
-      this._outPtr = exp.g(FRAME * 4);
-      this._exp    = exp;
-      this._memory = memory;
-      this._ready  = true;
+      this._memory = exp.e;
+      exp.f(); // ___wasm_call_ctors
+
+      this._state  = exp.g(FRAME, 48000);
+      this._bufPtr = exp.l(FRAME * 2);   // int16 process buffer
+      this._ctlPtr = exp.l(4);
+
+      const heap32 = new Int32Array(this._memory.buffer);
+      const setCtl = (req, val) => {
+        heap32[this._ctlPtr >> 2] = val;
+        exp.j(this._state, req, this._ctlPtr);
+      };
+      setCtl(CTL.SET_DENOISE, 1);        // noise suppression ON
+      setCtl(CTL.SET_AGC, 1);            // auto gain ON (replaces browser AGC)
+      setCtl(CTL.SET_VAD, 0);            // we don't need VAD decisions
+
+      this._exp = exp;
+      this._ready = true;
       this.port.postMessage({ type: 'ready' });
     } catch (e) {
       this.port.postMessage({ type: 'error', message: String(e) });
@@ -75,16 +116,17 @@ class CaptureProcessor extends AudioWorkletProcessor {
   }
 
   _processFrame () {
-    const heap  = new Float32Array(this._memory.buffer);
-    const inOff  = this._inPtr  >> 2;
-    const outOff = this._outPtr >> 2;
-    for (let i = 0; i < FRAME; i++) heap[inOff + i] = this._inBuf[i] * SCALE;
-    this._exp.j(this._state, this._outPtr, this._inPtr);
+    const exp = this._exp;
+    const heap = new Int16Array(this._memory.buffer);
+    const base = this._bufPtr >> 1;
     for (let i = 0; i < FRAME; i++) {
-      this._outRing[(this._outWrite + i) % RINGLEN] = heap[outOff + i] / SCALE;
+      let s = Math.max(-1, Math.min(1, this._inBuf[i]));
+      heap[base + i] = s < 0 ? s * 0x8000 : s * 0x7fff;
     }
-    this._outWrite  = (this._outWrite + FRAME) % RINGLEN;
-    this._outAvail += FRAME;
+    exp.i(this._state, this._bufPtr);
+    const f = new Float32Array(FRAME);
+    for (let i = 0; i < FRAME; i++) f[i] = heap[base + i] / 0x8000;
+    this.port.postMessage({ type: 'frame', frame: f });
   }
 
   _postRaw (src) {
@@ -105,11 +147,10 @@ class CaptureProcessor extends AudioWorkletProcessor {
     const inp = inputs[0]?.[0];
     const src = inp ?? new Float32Array(QSIZE);
 
-    // While RNNoise loads (or when bypassed) post raw 480-sample frames.
-    if (!this._ready) { this._postRaw(src); return true; }
-    if (this._bypass) { this._postRaw(src); return true; }
+    // While Speex loads (or when bypassed) post raw 480-sample frames.
+    if (!this._ready || this._bypass) { this._postRaw(src); return true; }
 
-    // Feed 128 samples into the 480-sample RNNoise accumulator.
+    // Feed 128 samples into the 480-sample Speex accumulator; emit when full.
     let offset = 0;
     while (offset < QSIZE) {
       const n = Math.min(FRAME - this._inCount, QSIZE - offset);
@@ -117,17 +158,6 @@ class CaptureProcessor extends AudioWorkletProcessor {
       this._inCount += n;
       offset += n;
       if (this._inCount === FRAME) { this._processFrame(); this._inCount = 0; }
-    }
-
-    // Drain one processed frame (480 samples) to the main thread.
-    if (this._outAvail >= FRAME) {
-      const f = new Float32Array(FRAME);
-      for (let i = 0; i < FRAME; i++) f[i] = this._outRing[(this._outRead + i) % RINGLEN];
-      this._outRead  = (this._outRead + FRAME) % RINGLEN;
-      this._outAvail -= FRAME;
-      this.port.postMessage({ type: 'frame', frame: f });
-    } else {
-      this._postRaw(src);
     }
     return true;
   }

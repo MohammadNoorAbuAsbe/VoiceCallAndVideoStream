@@ -420,8 +420,6 @@ function hangUp() {
 function endCallCleanup(msg) {
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
   clearTimeout(selfReconnectTimer); selfReconnectTimer = null;
-  clearTimeout(_audioFlushTimer); _audioFlushTimer = null;
-  _audioBatch = [];
   _starveStart = 0;
   stopCallTimer();
   audio.closeCapture();
@@ -473,7 +471,7 @@ function toggleNoiseCancellation() {
   noiseCancellationEnabled = !noiseCancellationEnabled;
   audio.setNoiseCancel(noiseCancellationEnabled);
   document.getElementById('btn-noise-cancel').classList.toggle('nc-off', !noiseCancellationEnabled);
-  showToast(noiseCancellationEnabled ? 'Noise cancellation on.' : 'Noise cancellation off.');
+  showToast(noiseCancellationEnabled ? 'Denoise on (SpeexDSP).' : 'Denoise off.');
 }
 function resetInCallButtons() {
   isMuted = false;
@@ -653,28 +651,13 @@ function saveContact() {
 }
 
 // ─── Audio frame wiring ───────────────────────────────────────────────────────────
-// Batch a couple of 48 kHz frames (~20 ms) per WebSocket message to cut overhead
-// and smooth delivery, rather than one message every 10 ms.
-let _audioBatch = [];
-let _audioFlushTimer = null;
+// Send each 10 ms frame immediately. For gaming we want the lowest possible
+// talk-latency, so we do not batch frames into larger WebSocket messages.
 let _starveStart = 0;
-
-function flushAudioBatch() {
-  _audioFlushTimer = null;
-  if (_audioBatch.length === 0) return;
-  let total = 0;
-  for (const b of _audioBatch) total += b.byteLength;
-  const merged = new Uint8Array(total);
-  let off = 0;
-  for (const b of _audioBatch) { merged.set(new Uint8Array(b), off); off += b.byteLength; }
-  _audioBatch = [];
-  if (relay && relay.connected) relay.sendAudio(merged.buffer);
-}
 
 audio.setOnFrame((frame48) => {
   if (!activeCall || !relay || !relay.connected) return;
-  _audioBatch.push(audio.capture48ToWire(frame48));
-  if (!_audioFlushTimer) _audioFlushTimer = setTimeout(flushAudioBatch, 20);
+  relay.sendAudio(audio.capture48ToWire(frame48));
 });
 audio.setOnStarved((starved) => {
   if (!activeCall) return;

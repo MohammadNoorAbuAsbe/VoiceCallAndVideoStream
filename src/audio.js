@@ -1,10 +1,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  Audio pipeline (capture → 48 kHz PCM → relay, and relay → playback)
 //
-//  Capture : mic → AudioContext@48k → capture-worklet (RNNoise, optional)
-//            → 480 Float32 frames → Int16 → relay (sent verbatim, no resampling).
-//  Playback: relay Int16 → Float32 → player-worklet ring buffer (with jitter
-//            buffering) → destination.
+//  Capture : mic → AudioContext@48k → capture-worklet (SpeexDSP noise
+//            suppression, optional) → 480 Float32 frames → Int16 → relay
+//            (sent verbatim, no resampling). Browser echoCancellation stays on
+//            for AEC; Speex handles noise suppression + AGC.
+//  Playback: relay Int16 → Float32 → player-worklet ring buffer (with adaptive
+//            jitter buffering) → destination.
 //
 //  No ICE/TURN: audio simply rides the WebSocket as small binary frames.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -26,9 +28,9 @@ export async function initCapture(micDeviceId, noiseCancelEnabled) {
   captureStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       ...(micDeviceId ? { deviceId: { ideal: micDeviceId } } : {}),
-      echoCancellation: true,
-      autoGainControl: true,
-      noiseSuppression: false, // we run our own (RNNoise); avoid double-processing
+      echoCancellation: true,   // browser AEC (echo); Speex does noise + AGC
+      autoGainControl: false,   // Speex AGC handles gain
+      noiseSuppression: false,  // SpeexDSP handles noise suppression
     },
     video: false
   });
@@ -37,7 +39,7 @@ export async function initCapture(micDeviceId, noiseCancelEnabled) {
   await captureCtx.resume(); // <-- critical: a suspended context yields SILENCE
 
   await captureCtx.audioWorklet.addModule('./capture-worklet.js');
-  const wasmResp = await fetch('./assets/rnnoise.wasm');
+  const wasmResp = await fetch('./assets/speex.wasm');
   const wasmBinary = await wasmResp.arrayBuffer();
 
   const source = captureCtx.createMediaStreamSource(captureStream);
