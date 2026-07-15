@@ -1,15 +1,22 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  Audio pipeline (capture → 48 kHz PCM → relay, and relay → playback)
 //
-//  Capture : mic → AudioContext@48k → capture-worklet (SpeexDSP noise
-//            suppression, optional) → 480 Float32 frames → Int16 → relay
-//            (sent verbatim, no resampling). Browser echoCancellation stays on
-//            for AEC; Speex handles noise suppression + AGC.
+//  Capture : mic → AudioContext@48k → capture-worklet (raw 512-sample frames)
+//            → main thread: FastEnhancer DTLN neural denoiser (optional) +
+//            noise gate → Int16 → relay (sent verbatim, no resampling).
+//            The denoiser runs on the MAIN THREAD because it is an ES module
+//            (AudioWorkletProcessors cannot import ES modules). 512 samples =
+//            10.67 ms @ 48 kHz, the DTLN native frame. Browser echoCancellation
+//            + autoGainControl stay on; noise suppression is the DTLN's job.
 //  Playback: relay Int16 → Float32 → player-worklet ring buffer (with adaptive
 //            jitter buffering) → destination.
 //
 //  No ICE/TURN: audio simply rides the WebSocket as small binary frames.
 // ─────────────────────────────────────────────────────────────────────────────
+
+import { loadModel } from './assets/fastenhancer/api/index.js';
+
+const MODEL_SIZE = 'base';   // 'tiny' | 'base' | 'small' — bump to 'small' for max NS
 
 let captureCtx   = null;
 let playCtx      = null;
@@ -18,6 +25,7 @@ let playerNode   = null;
 let captureStream = null;
 let muted        = false;
 let noiseCancel  = true;
+let denoiser     = null;     // FastEnhancer DTLN instance (main thread)
 let onFrame      = null;     // (Float32Array@48k) => void
 let onStarved    = null;     // (boolean) => void
 
@@ -28,9 +36,9 @@ export async function initCapture(micDeviceId, noiseCancelEnabled) {
   captureStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       ...(micDeviceId ? { deviceId: { ideal: micDeviceId } } : {}),
-      echoCancellation: true,   // browser AEC (echo); Speex does noise + AGC
-      autoGainControl: false,   // Speex AGC handles gain
-      noiseSuppression: false,  // SpeexDSP handles noise suppression
+      echoCancellation: true,   // browser AEC (echo); DTLN does noise suppression
+      autoGainControl: true,    // browser AGC stabilises level for the DTLN
+      noiseSuppression: false,  // FastEnhancer DTLN owns noise suppression
     },
     video: false
   });
@@ -39,8 +47,6 @@ export async function initCapture(micDeviceId, noiseCancelEnabled) {
   await captureCtx.resume(); // <-- critical: a suspended context yields SILENCE
 
   await captureCtx.audioWorklet.addModule('./capture-worklet.js');
-  const wasmResp = await fetch('./assets/speex.wasm');
-  const wasmBinary = await wasmResp.arrayBuffer();
 
   const source = captureCtx.createMediaStreamSource(captureStream);
   captureNode = new AudioWorkletNode(captureCtx, 'capture-processor');
@@ -52,14 +58,65 @@ export async function initCapture(micDeviceId, noiseCancelEnabled) {
   captureNode.connect(sink);
   sink.connect(captureCtx.destination);
 
-  captureNode.port.postMessage({ type: 'init', wasmBinary }, [wasmBinary]);
-  captureNode.port.postMessage({ type: 'bypass', value: !noiseCancel });
+  // Initialise the neural denoiser on the main thread (weights are embedded
+  // as base64 in the vendored module — no fetch, no CDN).
+  try {
+    const model = await loadModel(MODEL_SIZE);
+    denoiser = await model.createDenoiser();
+  } catch (e) {
+    console.warn('[audio] denoiser init failed — sending raw audio:', e);
+    denoiser = null;
+  }
 
   captureNode.port.onmessage = ({ data }) => {
-    if (data.type === 'frame' && !muted && onFrame) onFrame(data.frame);
+    if (data.type !== 'frame' || muted || !onFrame) return;
+    onFrame(processCaptureFrame(data.frame));
   };
 
   return captureStream;
+}
+
+// ─── Capture frame processing (main thread) ──────────────────────────────────
+// Runs the DTLN denoiser (when enabled) followed by a noise gate that mutes
+// near-silence so residual AC hum / keyboard tails between sentences are cut.
+function processCaptureFrame(frame) {
+  if (noiseCancel && denoiser) {
+    try { frame = denoiser.processFrame(frame); }
+    catch (e) { console.warn('[audio] denoiser frame failed:', e); }
+    return applyNoiseGate(frame);
+  }
+  return frame;
+}
+
+// Noise gate state.
+let _gateOpen = false;
+let _gateEnv  = 0;
+const GATE_OPEN_DB   = -36;   // open (let audio through) above this peak level
+const GATE_CLOSE_DB  = -46;   // close (mute) below this peak level (hysteresis)
+const GATE_ATTACK    = 0.08;  // ramp-up smoothing per frame when opening
+const GATE_RELEASE   = 0.85;  // fast fade per frame when closing
+const _gateOpenLin   = Math.pow(10, GATE_OPEN_DB / 20);
+const _gateCloseLin  = Math.pow(10, GATE_CLOSE_DB / 20);
+
+function applyNoiseGate(frame) {
+  let peak = 0;
+  for (let i = 0; i < frame.length; i++) {
+    const a = frame[i] < 0 ? -frame[i] : frame[i];
+    if (a > peak) peak = a;
+  }
+  if (peak > _gateOpenLin) _gateOpen = true;
+  else if (peak < _gateCloseLin) _gateOpen = false;
+
+  _gateEnv = _gateOpen
+    ? Math.min(1, _gateEnv + GATE_ATTACK)
+    : Math.max(0, _gateEnv - GATE_RELEASE);
+
+  if (_gateEnv >= 1) return frame;            // fully open — no copy
+  const out = new Float32Array(frame.length); // closed → zeros
+  if (_gateEnv > 0) {
+    for (let i = 0; i < frame.length; i++) out[i] = frame[i] * _gateEnv;
+  }
+  return out;
 }
 
 export function setOnFrame(cb)     { onFrame = cb; }
@@ -71,7 +128,6 @@ export function setMuted(value) {
 
 export function setNoiseCancel(value) {
   noiseCancel = value;
-  if (captureNode) captureNode.port.postMessage({ type: 'bypass', value: !noiseCancel });
 }
 
 /** Convert Float32 PCM → Int16 ArrayBuffer for WebSocket binary send. */
@@ -138,6 +194,7 @@ export async function setOutputDevice(deviceId) {
 }
 
 export function closeCapture() {
+  if (denoiser) { try { denoiser.destroy(); } catch (_) {} denoiser = null; }
   if (captureStream) { captureStream.getTracks().forEach(t => t.stop()); captureStream = null; }
   if (captureCtx)   { captureCtx.close().catch(() => {}); captureCtx = null; }
   captureNode = null;

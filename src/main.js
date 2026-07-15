@@ -471,7 +471,7 @@ function toggleNoiseCancellation() {
   noiseCancellationEnabled = !noiseCancellationEnabled;
   audio.setNoiseCancel(noiseCancellationEnabled);
   document.getElementById('btn-noise-cancel').classList.toggle('nc-off', !noiseCancellationEnabled);
-  showToast(noiseCancellationEnabled ? 'Denoise on (SpeexDSP).' : 'Denoise off.');
+  showToast(noiseCancellationEnabled ? 'Denoise on (FastEnhancer DTLN).' : 'Denoise off.');
 }
 function resetInCallButtons() {
   isMuted = false;
