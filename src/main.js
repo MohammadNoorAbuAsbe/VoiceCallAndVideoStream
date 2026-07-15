@@ -420,6 +420,9 @@ function hangUp() {
 function endCallCleanup(msg) {
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
   clearTimeout(selfReconnectTimer); selfReconnectTimer = null;
+  clearTimeout(_audioFlushTimer); _audioFlushTimer = null;
+  _audioBatch = [];
+  _starveStart = 0;
   stopCallTimer();
   audio.closeCapture();
   activeCall = null;
@@ -650,18 +653,44 @@ function saveContact() {
 }
 
 // ─── Audio frame wiring ───────────────────────────────────────────────────────────
+// Batch a couple of 48 kHz frames (~20 ms) per WebSocket message to cut overhead
+// and smooth delivery, rather than one message every 10 ms.
+let _audioBatch = [];
+let _audioFlushTimer = null;
+let _starveStart = 0;
+
+function flushAudioBatch() {
+  _audioFlushTimer = null;
+  if (_audioBatch.length === 0) return;
+  let total = 0;
+  for (const b of _audioBatch) total += b.byteLength;
+  const merged = new Uint8Array(total);
+  let off = 0;
+  for (const b of _audioBatch) { merged.set(new Uint8Array(b), off); off += b.byteLength; }
+  _audioBatch = [];
+  if (relay && relay.connected) relay.sendAudio(merged.buffer);
+}
+
 audio.setOnFrame((frame48) => {
   if (!activeCall || !relay || !relay.connected) return;
-  relay.sendAudio(audio.capture48ToWire(frame48));
+  _audioBatch.push(audio.capture48ToWire(frame48));
+  if (!_audioFlushTimer) _audioFlushTimer = setTimeout(flushAudioBatch, 20);
 });
 audio.setOnStarved((starved) => {
   if (!activeCall) return;
-  const statusEl = document.querySelector('#screen-incall .call-status-text');
-  if (!statusEl) return;
-  if (starved && Date.now() - callConnectedAt > 2500 && !reconnecting) {
-    statusEl.textContent = 'No audio from ' + activeCall.peerName;
-  } else if (!reconnecting) {
-    statusEl.textContent = 'Connected';
+  if (starved) {
+    // Only warn after *sustained* starvation (the initial buffering window is normal).
+    if (!_starveStart) _starveStart = Date.now();
+    if (!reconnecting && Date.now() - _starveStart > 1500) {
+      const statusEl = document.querySelector('#screen-incall .call-status-text');
+      if (statusEl) statusEl.textContent = 'No audio from ' + activeCall.peerName;
+    }
+  } else {
+    _starveStart = 0;
+    if (!reconnecting) {
+      const statusEl = document.querySelector('#screen-incall .call-status-text');
+      if (statusEl) statusEl.textContent = 'Connected';
+    }
   }
 });
 

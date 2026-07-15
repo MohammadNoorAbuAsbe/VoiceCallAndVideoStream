@@ -1,9 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  Audio pipeline (capture → 16 kHz PCM → relay, and relay → playback)
+//  Audio pipeline (capture → 48 kHz PCM → relay, and relay → playback)
 //
 //  Capture : mic → AudioContext@48k → capture-worklet (RNNoise, optional)
-//            → 480 Float32 frames → main decimates to 160 @16k → Int16 → relay.
-//  Playback: relay Int16 → Float32 → player-worklet ring buffer → destination.
+//            → 480 Float32 frames → Int16 → relay (sent verbatim, no resampling).
+//  Playback: relay Int16 → Float32 → player-worklet ring buffer (with jitter
+//            buffering) → destination.
 //
 //  No ICE/TURN: audio simply rides the WebSocket as small binary frames.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -17,9 +18,6 @@ let muted        = false;
 let noiseCancel  = true;
 let onFrame      = null;     // (Float32Array@48k) => void
 let onStarved    = null;     // (boolean) => void
-
-// One-pole low-pass state for the 48k→16k decimation.
-let _lp = 0;
 
 /** Acquire the mic and start the capture graph. Resolves with the raw stream. */
 export async function initCapture(micDeviceId, noiseCancelEnabled) {
@@ -74,36 +72,25 @@ export function setNoiseCancel(value) {
   if (captureNode) captureNode.port.postMessage({ type: 'bypass', value: !noiseCancel });
 }
 
-/** Downsample one 48 kHz Float32 frame to 16 kHz (decimate by 3, low-passed). */
-function decimate(frame48) {
-  const out = new Float32Array(Math.floor(frame48.length / 3));
-  let j = 0;
-  for (let i = 0; i < frame48.length; i++) {
-    _lp += 0.15 * (frame48[i] - _lp);
-    if (i % 3 === 0) out[j++] = _lp;
-  }
-  return out;
-}
-
-/** Convert 16 kHz Float32 → Int16 ArrayBuffer for WebSocket binary send. */
-export function frameToBytes(frame16) {
-  const buf = new ArrayBuffer(frame16.length * 2);
+/** Convert Float32 PCM → Int16 ArrayBuffer for WebSocket binary send. */
+export function frameToBytes(frame) {
+  const buf = new ArrayBuffer(frame.length * 2);
   const view = new DataView(buf);
-  for (let i = 0; i < frame16.length; i++) {
-    let s = Math.max(-1, Math.min(1, frame16[i]));
+  for (let i = 0; i < frame.length; i++) {
+    let s = Math.max(-1, Math.min(1, frame[i]));
     view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
   }
   return buf;
 }
 
-/** Wrap an incoming 48 kHz frame as bytes ready to send. */
+/** Wrap an incoming 48 kHz frame as bytes, sent verbatim (no resampling). */
 export function capture48ToWire(frame48) {
-  return frameToBytes(decimate(frame48));
+  return frameToBytes(frame48);
 }
 
 // ─── Playback ────────────────────────────────────────────────────────────────
 export async function initPlayback() {
-  playCtx = new AudioContext({ sampleRate: 16000 });
+  playCtx = new AudioContext({ sampleRate: 48000 });
   await playCtx.resume();
   await playCtx.audioWorklet.addModule('./player-worklet.js');
   playerNode = new AudioWorkletNode(playCtx, 'player-processor');
