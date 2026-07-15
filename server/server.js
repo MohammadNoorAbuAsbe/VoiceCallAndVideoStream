@@ -38,13 +38,25 @@
 //    RELAY_TOKEN (optional; if set, clients must register with the same token)
 // ─────────────────────────────────────────────────────────────────────────────
 
+import http from 'node:http';
 import { WebSocketServer } from 'ws';
-import { randomUUID } from 'node:crypto';
 
 const PORT = Number(process.env.PORT) || 3000;
 const TOKEN = process.env.RELAY_TOKEN || '';
 
-const wss = new WebSocketServer({ port: PORT });
+// Minimal HTTP server so platforms like Render can health-check the service.
+// The WebSocket server upgrades the same HTTP listener.
+const httpServer = http.createServer((req, res) => {
+  if (req.url === '/healthz' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('ok');
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+const wss = new WebSocketServer({ server: httpServer });
 
 /** id → ws */
 const clients = new Map();
@@ -220,4 +232,6 @@ const heartbeat = setInterval(() => {
 }, 30000);
 wss.on('close', () => clearInterval(heartbeat));
 
-console.log(`VoiceCall relay listening on :${PORT}${TOKEN ? ' (token required)' : ''}`);
+httpServer.listen(PORT, () => {
+  console.log(`VoiceCall relay listening on :${PORT}${TOKEN ? ' (token required)' : ''}`);
+});
