@@ -1,0 +1,17 @@
+{
+  "id": "VoiceCallAndVideoStream",
+  "root": "C:\\Users\\MohammadNoor\\Documents\\GitHub\\VoiceCallAndVideoStream",
+  "snapshotCount": 1,
+  "commitCount": 0,
+  "decisionCount": 2,
+  "riskCount": 2,
+  "artifactCount": 0,
+  "latestAt": "2026-07-15T18:03:41Z",
+  "latestSnapshot": "snap_9adc67afbab90494",
+  "latestTitle": "Overhaul connection/call system to relay-based (no ICE/TURN)",
+  "branch": "main",
+  "head": "8405bc60da572893a802958c37b1340401fe2236",
+  "dirty": true,
+  "remoteUrl": "https://github.com/MohammadNoorAbuAsbe/VoiceCallAndVideoStream",
+  "latestGitState": "8405bc60da572893a802958c37b1340401fe2236"
+}
