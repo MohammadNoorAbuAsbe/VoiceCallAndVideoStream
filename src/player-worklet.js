@@ -12,7 +12,7 @@
  */
 
 const RING_LEN = 16384;   // ~341 ms @ 48 kHz headroom
-const FLOOR    = 320;     // ~6.7 ms minimum priming target
+const FLOOR    = 256;     // ~5.3 ms minimum priming target (low latency)
 const CEIL     = 2048;    // ~43 ms maximum (only under heavy jitter)
 const GROW     = 256;     // grow step on underrun
 const SHRINK   = 64;      // shrink step when steady
@@ -29,7 +29,7 @@ class PlayerProcessor extends AudioWorkletProcessor {
     this._count = 0;
     this._primed = false;
     this._starved = false;
-    this._target = 640;   // ~13 ms initial priming target
+    this._target = 384;   // ~8 ms initial priming target (low latency; grows only on underrun)
     this._steady = 0;
 
     // @illusion: receive Float32 frames from main thread and write to ring buffer

@@ -18,6 +18,10 @@ const KEY_RELAY_URL     = 'vcall_relay_url';
 const KEY_RELAY_TOKEN   = 'vcall_relay_token';
 
 // Bake your deployed wss:// URL here so users never have to set it.
+// NOTE: the relay's region dominates talk-latency because every frame makes two
+// WebSocket hops through it. Deploy the server in the region closest to your
+// callers (e.g. Frankfurt for Israel/Europe) — NOT the default Oregon — then set
+// this URL to the new deployment. See server/README.md.
 let DEFAULT_RELAY_URL = 'wss://voicecallandvideostream.onrender.com';
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -243,8 +247,8 @@ function initRelay() {
       const session = activeCall && activeCall.session;
       if (!session || !session.ready) return; // can't decrypt without a session
       const chain = (activeCall._recvChain || Promise.resolve())
-        .then(() => session.decrypt(bytes))
-        .then((pt) => audio.playBytes(pt.buffer !== undefined ? pt.buffer : pt))
+        .then(() => decryptBatch(bytes, session))
+        .then((frames) => { for (const f of frames) audio.playBytes(f.buffer !== undefined ? f.buffer : f); })
         .catch(() => {}); // drop undecryptable frames
       activeCall._recvChain = chain;
     })
@@ -497,6 +501,7 @@ function hangUp() {
 function endCallCleanup(msg) {
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
   clearTimeout(selfReconnectTimer); selfReconnectTimer = null;
+  flushBatch();              // send any remaining buffered audio frames
   _starveStart = 0;
   stopCallTimer();
   audio.closeCapture();
@@ -738,6 +743,34 @@ function saveContact() {
 // talk-latency, so we do not batch frames into larger WebSocket messages.
 let _starveStart = 0;
 
+// ─── Frame batching ────────────────────────────────────────────────────────────
+// Each encrypted frame is a fixed 12-byte nonce + 1024-byte AES-GCM ciphertext
+// (incl. 16-byte tag) = 1052 bytes. We accumulate a few encrypted frames into a
+// single WebSocket binary message (FRAME_BATCH of them ≈ 21 ms) before sending.
+// This cuts per-message overhead and delivery jitter without meaningfully
+// increasing delay. A short flush timer guarantees tails/silence still go out.
+const FRAME_PLAIN_BYTES = 1024;   // 512 samples × 2 bytes
+const FRAME_WIRE_BYTES  = 12 + FRAME_PLAIN_BYTES + 16; // nonce + ct + GCM tag
+const FRAME_BATCH = 2;            // frames per WebSocket message (~21 ms)
+let _batchBuf = null;             // Uint8Array accumulator of ciphertext
+let _batchTimer = null;           // flush timer for partial batches
+
+function flushBatch() {
+  if (_batchTimer) { clearTimeout(_batchTimer); _batchTimer = null; }
+  if (!_batchBuf || _batchBuf.length === 0) { _batchBuf = null; return; }
+  if (!activeCall || !relay || !relay.connected) { _batchBuf = null; return; }
+  const out = _batchBuf;
+  _batchBuf = null;
+  relay.sendAudio(out);
+}
+
+function concatBytes(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
 // Encrypt each captured frame end-to-end, then send it. Frames are chained so
 // ciphertext is emitted in capture order. No plaintext is ever sent: if the
 // secure session isn't ready yet the frame is dropped.
@@ -748,11 +781,29 @@ audio.setOnFrame((frame48) => {
   const wire = audio.capture48ToWire(frame48);
   const chain = (activeCall._sendChain || Promise.resolve())
     .then(() => session.encrypt(wire))
-    .then((ct) => { if (activeCall && relay && relay.connected) relay.sendAudio(ct); })
+    .then((ct) => {
+      if (!activeCall || !relay || !relay.connected) return;
+      // Accumulate into a batch; flush as one binary WS message.
+      _batchBuf = _batchBuf ? concatBytes(_batchBuf, ct) : ct;
+      if (_batchBuf.length >= FRAME_BATCH * FRAME_WIRE_BYTES) flushBatch();
+      else if (!_batchTimer) _batchTimer = setTimeout(flushBatch, FRAME_BATCH * 10);
+    })
     .catch(() => {});
   activeCall._sendChain = chain;
   return chain;
 });
+
+// Split a batched ciphertext blob back into individual frames and decrypt each
+// (each frame carries its own nonce, so fixed-size splitting is exact).
+async function decryptBatch(blob, session) {
+  const bytes = blob instanceof Uint8Array ? blob : new Uint8Array(blob);
+  const out = [];
+  for (let off = 0; off + FRAME_WIRE_BYTES <= bytes.length; off += FRAME_WIRE_BYTES) {
+    const pt = await session.decrypt(bytes.subarray(off, off + FRAME_WIRE_BYTES));
+    out.push(new Uint8Array(pt)); // own buffer so .buffer is exactly one frame
+  }
+  return out;
+}
 // @illusion: update UI on playback starvation status — show warning after sustained drop
 audio.setOnStarved((starved) => {
   if (!activeCall) return;
@@ -882,6 +933,8 @@ export function __resetState() {
   toastTimer = null;
   _starveStart = 0;
   _keybindCapturing = false;
+  if (_batchTimer) { clearTimeout(_batchTimer); _batchTimer = null; }
+  _batchBuf = null;
   DEFAULT_RELAY_URL = 'wss://voicecallandvideostream.onrender.com';
 }
 

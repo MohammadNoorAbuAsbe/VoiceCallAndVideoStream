@@ -44,7 +44,7 @@ function drain(p, out = new Float32Array(128)) {
 describe('player-processor', () => {
   it('outputs silence and is not primed before enough is buffered', () => {
     const p = makeProcessor();
-    feed(p, 4); // 512 < 640 target
+    feed(p, 2); // 256 < 384 initial target
     expect(p._primed).toBe(false);
     const out = drain(p);
     expect(Array.from(out).every((v) => v === 0)).toBe(true);
@@ -95,7 +95,7 @@ describe('player-processor', () => {
       drain(p);
     }
     expect(p._target).toBeLessThan(before); // shrank toward FLOOR
-    expect(p._target).toBeGreaterThanOrEqual(320);
+    expect(p._target).toBeGreaterThanOrEqual(256); // new FLOOR
   });
 
   it('posts a starved event on underrun and clears it when refilled', () => {

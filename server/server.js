@@ -91,7 +91,11 @@ const httpServer = http.createServer((req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server: httpServer });
+// perMessageDeflate: small PCM audio frames gain nothing from zlib and pay a
+// per-frame CPU cost, so disable it. setNoDelay (below) disables Nagle so each
+// audio frame is flushed immediately instead of being held for coalescing —
+// this is the single biggest in-app latency win for the relay.
+const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false });
 
 /** id → ws */
 const clients = new Map();
@@ -109,6 +113,10 @@ function sendBin(ws, data) {
 // Wire the per-connection protocol handlers onto a WebSocketServer.
 export function attachRelay(server) {
   server.on('connection', (ws) => {
+    // Flush every WebSocket frame the moment it's written — Nagle's algorithm
+    // would otherwise buffer small audio frames for up to ~40 ms waiting to
+    // coalesce them, adding that delay on top of every hop through the relay.
+    try { ws._socket.setNoDelay(true); } catch { /* no-op */ }
     ws.isAlive = true;
     ws.id = null;              // registered id (set only after successful auth)
     ws.pendingAuth = null;     // { id, pubKey, nonce } awaiting a signed challenge

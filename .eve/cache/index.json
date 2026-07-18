@@ -1,17 +1,17 @@
 {
   "id": "VoiceCallAndVideoStream",
   "root": "C:\\Users\\MohammadNoor\\Documents\\GitHub\\VoiceCallAndVideoStream",
-  "snapshotCount": 7,
+  "snapshotCount": 8,
   "commitCount": 2,
-  "decisionCount": 11,
-  "riskCount": 8,
+  "decisionCount": 14,
+  "riskCount": 10,
   "artifactCount": 0,
-  "latestAt": "2026-07-18T17:43:59Z",
-  "latestSnapshot": "snap_b6e400ce37635dfe",
-  "latestTitle": "End-to-end encrypted calls with key-derived identities",
+  "latestAt": "2026-07-18T18:57:27Z",
+  "latestSnapshot": "snap_348a6f6f20585c40",
+  "latestTitle": "Reduce voice-call talk-latency (Israel/Render)",
   "branch": "main",
-  "head": "54ceafc9ad2e8d1a432ecfca6b31fb7b06e391cb",
+  "head": "63bad25a965a205616575fb75cc09a675d028e4a",
   "dirty": true,
   "remoteUrl": "https://github.com/MohammadNoorAbuAsbe/VoiceCallAndVideoStream",
-  "latestGitState": "54ceafc9ad2e8d1a432ecfca6b31fb7b06e391cb"
+  "latestGitState": "63bad25a965a205616575fb75cc09a675d028e4a"
 }

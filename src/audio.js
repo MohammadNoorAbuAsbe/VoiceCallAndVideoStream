@@ -26,11 +26,16 @@ let playerNode   = null;
 let captureStream = null;
 let muted        = false;
 let noiseCancel  = true;
-let denoiser     = null;     // FastEnhancer DTLN instance (main thread)
+let denoiser     = null;     // FastEnhancer DTLN instance (main-thread fallback)
+let denoiserWorker = null;   // Web Worker running the DTLN off the main thread
+let workerReady  = false;    // worker has loaded the model and is accepting frames
+let useWorker    = false;    // we successfully created a denoiser worker
 let onFrame      = null;     // (Float32Array@48k) => void
 let onStarved    = null;     // (boolean) => void
 
-// Noise gate (stateful) used after the denoiser in the capture path.
+// Noise gate (stateful) used after the denoiser in the capture path. Only runs
+// when the denoiser actually processed the frame (mirrors the original behavior
+// where raw audio with no denoiser was left untouched).
 const noiseGate  = createNoiseGate();
 
 // @illusion: acquire mic, create capture AudioContext+worklet, load neural denoiser
@@ -62,8 +67,42 @@ export async function initCapture(micDeviceId, noiseCancelEnabled) {
   captureNode.connect(sink);
   sink.connect(captureCtx.destination);
 
-  // Initialise the neural denoiser on the main thread (weights are embedded
-  // as base64 in the vendored module — no fetch, no CDN).
+  // Initialise the neural denoiser OFF the main thread in a Web Worker so its
+  // (heavy) inference never blocks the realtime send path. If Workers are
+  // unavailable or the worker fails, we transparently fall back to running the
+  // denoiser on the main thread (the original behavior).
+  try {
+    if (typeof Worker !== 'undefined') {
+      const w = new Worker('./denoiser-worker.js', { type: 'module' });
+      w.onmessage = (e) => {
+        const m = e.data || {};
+        if (m.type === 'ready') workerReady = true;
+        else if (m.type === 'error') { console.warn('[audio] worker denoiser failed — main-thread fallback:', m.message); useWorker = false; ensureMainDenoiser(); }
+        else if (m.type === 'processed') deliverProcessed(m.frame, true);
+      };
+      w.onerror = () => { console.warn('[audio] denoiser worker errored — main-thread fallback'); useWorker = false; ensureMainDenoiser(); };
+      w.postMessage({ type: 'init', modelSize: MODEL_SIZE });
+      denoiserWorker = w;
+      useWorker = true;
+    }
+  } catch (e) {
+    console.warn('[audio] could not start denoiser worker — main-thread fallback:', e);
+    useWorker = false;
+  }
+  if (!useWorker) await ensureMainDenoiser();
+
+  captureNode.port.onmessage = ({ data }) => {
+    if (data.type !== 'frame' || muted || !onFrame) return;
+    handleCaptureFrame(data.frame);
+  };
+
+  return captureStream;
+}
+
+// Load the denoiser on the main thread (used as a fallback when the worker is
+// unavailable). Weights are embedded as base64 in the vendored module.
+async function ensureMainDenoiser() {
+  if (denoiser || !noiseCancel) return;
   try {
     const model = await loadModel(MODEL_SIZE);
     denoiser = await model.createDenoiser();
@@ -71,26 +110,31 @@ export async function initCapture(micDeviceId, noiseCancelEnabled) {
     console.warn('[audio] denoiser init failed — sending raw audio:', e);
     denoiser = null;
   }
-
-  captureNode.port.onmessage = ({ data }) => {
-    if (data.type !== 'frame' || muted || !onFrame) return;
-    onFrame(processCaptureFrame(data.frame));
-  };
-
-  return captureStream;
 }
 
-// ─── Capture frame processing (main thread) ──────────────────────────────────
-// Runs the DTLN denoiser (when enabled) followed by a noise gate that mutes
-// near-silence so residual AC hum / keyboard tails between sentences are cut.
-// @illusion: run DTLN denoiser (if enabled) then noise gate on capture frame
-function processCaptureFrame(frame) {
-  if (noiseCancel && denoiser) {
-    try { frame = denoiser.processFrame(frame); }
-    catch (e) { console.warn('[audio] denoiser frame failed:', e); }
-    return noiseGate.process(frame);
+// ─── Capture frame processing ────────────────────────────────────────────────
+// Forwards the raw frame to the worker (when active). When running on the main
+// thread (fallback), runs the DTLN denoiser here.
+// @illusion: dispatch a captured frame to the worker or the main-thread denoiser
+function handleCaptureFrame(frame) {
+  if (useWorker && workerReady && denoiserWorker && noiseCancel) {
+    // Copy: the worklet's buffer is reused, and we hand ownership to the worker.
+    denoiserWorker.postMessage({ type: 'frame', frame: frame.slice() });
+    return;
   }
-  return frame;
+  let processed = false;
+  if (noiseCancel && denoiser) {
+    try { frame = denoiser.processFrame(frame); processed = true; }
+    catch (e) { console.warn('[audio] denoiser frame failed:', e); }
+  }
+  deliverProcessed(frame, processed);
+}
+
+// Apply the noise gate (only after the denoiser actually ran) and emit.
+// @illusion: run noise gate (if denoised) then forward processed frame
+function deliverProcessed(frame, processed) {
+  if (processed && noiseCancel) frame = noiseGate.process(frame);
+  if (onFrame) onFrame(frame);
 }
 
 // @illusion: set callback for processed capture frames
@@ -165,6 +209,12 @@ export async function setOutputDevice(deviceId) {
 
 // @illusion: tear down capture graph, stop mic tracks, destroy denoiser
 export function closeCapture() {
+  if (denoiserWorker) {
+    try { denoiserWorker.postMessage({ type: 'destroy' }); denoiserWorker.terminate(); } catch (_) { /* no-op */ }
+    denoiserWorker = null;
+  }
+  workerReady = false;
+  useWorker = false;
   if (denoiser) { try { denoiser.destroy(); } catch (_) {} denoiser = null; }
   if (captureStream) { captureStream.getTracks().forEach(t => t.stop()); captureStream = null; }
   if (captureCtx)   { captureCtx.close().catch(() => {}); captureCtx = null; }

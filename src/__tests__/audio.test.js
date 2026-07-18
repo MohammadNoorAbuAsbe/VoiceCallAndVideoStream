@@ -117,6 +117,22 @@ describe('initCapture', () => {
     const audioArg = navigator.mediaDevices.getUserMedia.mock.calls[0][0].audio;
     expect(audioArg.deviceId).toBeUndefined();
   });
+
+  it('falls back to the main-thread denoiser when Worker construction throws', async () => {
+    const prev = globalThis.Worker;
+    globalThis.Worker = class { constructor() { throw new Error('no workers'); } };
+    try {
+      loadModel.mockResolvedValue({ createDenoiser: vi.fn(async () => makeDenoiser()) });
+      await audio.initCapture('mic-id', true);
+      const captureNode = workletNodes[0];
+      const onFrame = vi.fn();
+      audio.setOnFrame(onFrame);
+      captureNode.port.onmessage({ data: { type: 'frame', frame: new Float32Array([0.5]) } });
+      expect(onFrame).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.Worker = prev;
+    }
+  });
 });
 
 describe('capture frame processing', () => {
