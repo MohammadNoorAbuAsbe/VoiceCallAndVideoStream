@@ -18,7 +18,9 @@ const GROW     = 256;     // grow step on underrun
 const SHRINK   = 64;      // shrink step when steady
 const STEADY   = 48000;   // samples of glitch-free audio before we shrink (~1 s)
 
+// @illusion: ring buffer playback with adaptive jitter buffer for smooth audio
 class PlayerProcessor extends AudioWorkletProcessor {
+  // @illusion: init ring buffer, adaptive jitter target, and message port for incoming frames
   constructor () {
     super();
     this._buf = new Float32Array(RING_LEN);
@@ -30,6 +32,7 @@ class PlayerProcessor extends AudioWorkletProcessor {
     this._target = 640;   // ~13 ms initial priming target
     this._steady = 0;
 
+    // @illusion: receive Float32 frames from main thread and write to ring buffer
     this.port.onmessage = ({ data }) => {
       const f = data; // Float32Array
       for (let i = 0; i < f.length; i++) {
@@ -40,17 +43,12 @@ class PlayerProcessor extends AudioWorkletProcessor {
     };
   }
 
+  // @illusion: read from ring buffer, adapt jitter target on underrun/steady state, report starvation
   process (_inputs, outputs) {
     const out = outputs[0]?.[0];
     if (!out) return true;
 
     if (!this._primed && this._count >= this._target) this._primed = true;
-    if (this._primed && this._count === 0) {
-      // True underrun: grow the target so the next burst has more slack.
-      this._primed = false;
-      this._target = Math.min(CEIL, this._target + GROW);
-      this._steady = 0;
-    }
 
     if (this._primed) {
       for (let i = 0; i < out.length; i++) {
@@ -67,6 +65,14 @@ class PlayerProcessor extends AudioWorkletProcessor {
       if (this._steady >= STEADY) {
         this._steady = 0;
         this._target = Math.max(FLOOR, this._target - SHRINK);
+      }
+      // Underrun: the buffer drained to zero while we were playing. Grow the
+      // target so the next burst has more slack, and drop out of the primed
+      // state so the starvation signal can fire.
+      if (this._count === 0) {
+        this._primed = false;
+        this._target = Math.min(CEIL, this._target + GROW);
+        this._steady = 0;
       }
     } else {
       for (let i = 0; i < out.length; i++) out[i] = 0; // buffering / underrun → silence

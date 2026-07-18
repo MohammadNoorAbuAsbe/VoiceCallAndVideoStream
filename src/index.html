@@ -8,10 +8,10 @@
 </head>
 <body>
 
-  <!--  Toast notification  -->
+  <!-- @illusion: toast notification for status/error messages -->
   <div id="toast" class="toast" role="alert" aria-live="assertive"></div>
 
-  <!--  Screen: Idle / Home  -->
+  <!-- @illusion: idle/home screen with peer ID, relay status, and contacts list -->
   <section id="screen-idle" class="screen active">
     <div class="home-header">
       <div class="home-title-row">
@@ -49,7 +49,7 @@
     <div id="contacts-list" class="contacts-list"></div>
   </section>
 
-  <!--  Screen: Add Contact  -->
+  <!-- @illusion: add contact screen with name and peer ID input fields -->
   <section id="screen-add-contact" class="screen">
     <button class="btn-back" id="btn-back-add">&#8592; Back</button>
     <h2>Add Contact</h2>
@@ -64,12 +64,13 @@
     <button id="btn-save-contact" class="btn btn-primary full-width" style="margin-top:20px;">Save Contact</button>
   </section>
 
-  <!--  Screen: Settings  -->
+  <!-- @illusion: settings screen with relay URL, mic/output device select, and mute keybind -->
   <section id="screen-settings" class="screen">
     <button class="btn-back" id="btn-back-settings">&#8592; Back</button>
     <h2>Settings</h2>
 
-    <div class="settings-section">
+    <!-- @illusion: relay server URL and token configuration section -->
+      <div class="settings-section">
       <label class="field-label" for="relay-url-input">Relay Server URL</label>
       <input id="relay-url-input" class="text-input" type="text" placeholder="wss://your-relay.example.com" autocomplete="off" spellcheck="false" />
       <label class="field-label" style="margin-top:12px;" for="relay-token-input">Relay Token (optional)</label>
@@ -78,6 +79,7 @@
       <p class="settings-hint">The WebSocket relay forwards audio between peers. Set this to your hosted <code>wss://</code> URL.</p>
     </div>
 
+    <!-- @illusion: microphone (input) device selection -->
     <div class="settings-section">
       <label class="field-label" for="select-mic">Microphone (Input)</label>
       <select id="select-mic" class="select-device">
@@ -85,6 +87,7 @@
       </select>
     </div>
 
+    <!-- @illusion: speaker (output) device selection -->
     <div class="settings-section">
       <label class="field-label" for="select-output">Speaker (Output)</label>
       <select id="select-output" class="select-device">
@@ -102,6 +105,7 @@
       Refresh Device List
     </button>
 
+    <!-- @illusion: mute/unmute keybind configuration section -->
     <div class="settings-section">
       <label class="field-label">Mute / Unmute Keybind</label>
       <div class="keybind-row">
@@ -113,7 +117,7 @@
     </div>
   </section>
 
-  <!--  Screen: Calling (outgoing, waiting for answer)  -->
+  <!-- @illusion: calling screen shown while waiting for remote peer to answer -->
   <section id="screen-calling" class="screen">
     <div class="call-card">
       <div class="calling-avatar" id="calling-avatar">?</div>
@@ -123,7 +127,7 @@
     <button id="btn-cancel-call" class="btn btn-danger" style="margin-top:36px; align-self:center; padding: 10px 32px;">Cancel</button>
   </section>
 
-  <!--  Screen: Incoming Call  -->
+  <!-- @illusion: incoming call screen with accept/decline buttons -->
   <section id="screen-incoming" class="screen">
     <div class="call-card">
       <div class="pulse-ring" style="background: var(--accent);"></div>
@@ -155,7 +159,7 @@
     </div>
   </section>
 
-  <!--  Screen: In-Call  -->
+  <!-- @illusion: active call screen with mute, denoise, hangup controls and reconnect overlay -->
   <section id="screen-incall" class="screen">
     <div class="call-card">
       <div class="pulse-ring"></div>
@@ -218,10 +222,10 @@
     </div>
   </section>
 
-  <!--  Hidden audio element (audio is rendered through this for output-device support)  -->
+  <!-- @illusion: hidden audio element for setSinkId output device routing -->
   <audio id="remote-audio" autoplay playsinline></audio>
 
-  <!--  App (relay-based; no PeerJS / WebRTC)  -->
+  <!-- @illusion: main application entry point (relay-based, no WebRTC) -->
   <script type="module" src="main.js"></script>
 </body>
 </html>

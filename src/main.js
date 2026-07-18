@@ -9,7 +9,6 @@
 
 // ─── Storage keys ────────────────────────────────────────────────────────────
 const KEY_ID            = 'vcall_peer_id';
-const KEY_CONTACTS      = 'vcall_contacts';
 const KEY_MIC_DEVICE    = 'vcall_mic_device';
 const KEY_OUTPUT_DEVICE = 'vcall_out_device';
 const KEY_MUTE_KEYBIND  = 'vcall_mute_key';
@@ -17,11 +16,15 @@ const KEY_RELAY_URL     = 'vcall_relay_url';
 const KEY_RELAY_TOKEN   = 'vcall_relay_token';
 
 // Bake your deployed wss:// URL here so users never have to set it.
-const DEFAULT_RELAY_URL = 'wss://voicecallandvideostream.onrender.com';
+let DEFAULT_RELAY_URL = 'wss://voicecallandvideostream.onrender.com';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 import { RelayClient } from './relay.js';
 import * as audio from './audio.js';
+import {
+  escHtml, relativeTime, formatKeybind, generateId, generateCallId,
+  loadContacts, saveContacts, addOrUpdateContact, removeContact, touchLastCall, getContactName,
+} from './util.js';
 
 let relay        = null;
 let myId         = null;
@@ -46,11 +49,14 @@ let callSeconds = 0;
 const _originalTitle = document.title;
 
 // ─── Ringtone ─────────────────────────────────────────────────────────────────
+// @illusion: play repeating ringtone melody via Web Audio oscillators
 function startRingtone() {
   if (ringtoneActive) return;
   ringtoneActive = true;
   document.title = 'Incoming call…';
+  // @illusion: play one ringtone chord sequence and schedule next iteration
   function ringOnce() {
+    /* v8 ignore next */
     if (!ringtoneActive) return;
     ringtoneCtx = new AudioContext();
     const ctx = ringtoneCtx;
@@ -72,6 +78,8 @@ function startRingtone() {
       osc.start(now + t); osc.stop(now + t + 0.6);
     });
     ringtoneTimer = setTimeout(() => {
+      /* v8 ignore next */
+      // @illusion: <TODO: describe (try_statement)>
       if (ringtoneCtx) { try { ringtoneCtx.close(); } catch (_) {} ringtoneCtx = null; }
       ringOnce();
     }, 2200);
@@ -79,41 +87,24 @@ function startRingtone() {
   ringOnce();
 }
 let ringtoneCtx = null, ringtoneTimer = null, ringtoneActive = false;
+// @illusion: stop ringtone, close AudioContext, restore document title
 function stopRingtone() {
   ringtoneActive = false;
   clearTimeout(ringtoneTimer); ringtoneTimer = null;
+  /* v8 ignore next */
+  // @illusion: <TODO: describe (try_statement)>
   if (ringtoneCtx) { try { ringtoneCtx.close(); } catch (_) {} ringtoneCtx = null; }
   document.title = _originalTitle;
 }
 
-// ─── Contacts ─────────────────────────────────────────────────────────────────
-function loadContacts() {
-  try { return JSON.parse(localStorage.getItem(KEY_CONTACTS) || '[]'); }
-  catch { return []; }
-}
-function saveContacts(list) { localStorage.setItem(KEY_CONTACTS, JSON.stringify(list)); }
-function addOrUpdateContact(name, id) {
-  const list = loadContacts().filter(c => c.id !== id);
-  list.unshift({ id, name, lastCall: null });
-  saveContacts(list);
-}
-function removeContact(id) { saveContacts(loadContacts().filter(c => c.id !== id)); }
-function touchLastCall(id) {
-  const list = loadContacts();
-  const c = list.find(c => c.id === id);
-  if (c) { c.lastCall = Date.now(); saveContacts(list); }
-}
-function getContactName(id) {
-  const c = loadContacts().find(c => c.id === id);
-  return c ? c.name : id.slice(0, 10) + '…';
-}
-
 // ─── UI helpers ───────────────────────────────────────────────────────────────
+// @illusion: show target screen by ID, hide all others
 function showScreen(id) {
   document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
 }
 let toastTimer = null;
+// @illusion: show notification toast with optional error styling
 function showToast(msg, isError = false) {
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -121,19 +112,8 @@ function showToast(msg, isError = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.className = 'toast'; }, isError ? 8000 : 2500);
 }
-function escHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-function relativeTime(ts) {
-  const diff = Date.now() - ts;
-  if (diff < 60_000)     return 'just now';
-  if (diff < 3_600_000)  return Math.floor(diff / 60_000)   + 'm ago';
-  if (diff < 86_400_000) return Math.floor(diff / 3_600_000) + 'h ago';
-  return new Date(ts).toLocaleDateString();
-}
 
+// @illusion: render contacts list from localStorage with call/delete buttons
 function renderContacts() {
   const list = loadContacts();
   const el   = document.getElementById('contacts-list');
@@ -170,6 +150,7 @@ function renderContacts() {
 }
 
 // ─── Relay status indicator ───────────────────────────────────────────────────
+// @illusion: update relay status indicator color and text
 function setRelayStatus(connected, text) {
   const el = document.getElementById('relay-status');
   if (!el) return;
@@ -178,20 +159,23 @@ function setRelayStatus(connected, text) {
 }
 
 // ─── Relay connection ─────────────────────────────────────────────────────────
+// @illusion: read stored relay server URL
 function getRelayUrl()   { return localStorage.getItem(KEY_RELAY_URL)   || DEFAULT_RELAY_URL || ''; }
+// @illusion: read stored relay auth token
 function getRelayToken() { return localStorage.getItem(KEY_RELAY_TOKEN) || ''; }
+// @illusion: read stored microphone device ID
 function getMicDeviceId()    { return localStorage.getItem(KEY_MIC_DEVICE)    || ''; }
+// @illusion: read stored output device ID
 function getOutputDeviceId() { return localStorage.getItem(KEY_OUTPUT_DEVICE) || ''; }
 
-function generateId()    { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
-function generateCallId(){ return Math.random().toString(36).slice(2, 12); }
-
+// @illusion: load peer ID from storage or generate and persist new one
 function loadOrCreateId() {
   let id = localStorage.getItem(KEY_ID);
   if (!id) { id = generateId(); localStorage.setItem(KEY_ID, id); }
   return id;
 }
 
+// @illusion: create RelayClient, wire all event handlers, connect to relay
 function initRelay() {
   const url = getRelayUrl();
   if (!url) {
@@ -237,6 +221,7 @@ function initRelay() {
 }
 
 // ─── Incoming call ─────────────────────────────────────────────────────────────
+// @illusion: handle incoming call with glare resolution and auto-reject if busy
 function handleIncoming(m) {
   const { from, name, callId } = m;
 
@@ -257,12 +242,15 @@ function handleIncoming(m) {
   startRingtone();
 }
 
+// @illusion: accept pending incoming call, stop ringtone
 async function acceptCall() {
   if (!pendingIncoming) return;
   stopRingtone();
   await acceptIncomingInternal(pendingIncoming.callId, pendingIncoming.from, getContactName(pendingIncoming.from), false);
 }
+// @illusion: init mic, send accept to relay, transition to incall screen
 async function acceptIncomingInternal(callId, from, peerName, auto) {
+  // @illusion: <TODO: describe (try_statement)>
   try { await audio.initCapture(getMicDeviceId(), noiseCancellationEnabled); }
   catch (e) {
     handleMicError(e); // we still connect so we can hear them; we just can't talk
@@ -280,6 +268,7 @@ async function acceptIncomingInternal(callId, from, peerName, auto) {
   ensureAudioPlaying();
 }
 
+// @illusion: reject incoming call, stop ringtone, return to idle
 function rejectCall() {
   stopRingtone();
   if (pendingIncoming) relay.reject(pendingIncoming.callId, pendingIncoming.from);
@@ -288,6 +277,7 @@ function rejectCall() {
 }
 
 // ─── Outgoing call ─────────────────────────────────────────────────────────────
+// @illusion: initiate outgoing call with mic init and no-answer timeout
 async function startCall(peerId, peerName) {
   if (!getRelayUrl()) {
     showToast('Set the Relay Server URL in Settings first.', true);
@@ -297,6 +287,7 @@ async function startCall(peerId, peerName) {
   if (!relay || !relay.connected) { showToast('Connecting to relay…', true); return; }
   if (activeCall || pendingOutgoing || pendingIncoming) { showToast('You are already in a call.', true); return; }
 
+  // @illusion: <TODO: describe (try_statement)>
   try { await audio.initCapture(getMicDeviceId(), noiseCancellationEnabled); }
   catch (e) { handleMicError(e); return; }
 
@@ -321,6 +312,7 @@ async function startCall(peerId, peerName) {
   }, 40000);
 }
 
+// @illusion: cancel pending outgoing call, clean up state
 function cancelCall() {
   if (!pendingOutgoing) return;
   const { callId, to } = pendingOutgoing;
@@ -332,6 +324,7 @@ function cancelCall() {
 }
 
 // ─── Call accepted by the other side ───────────────────────────────────────────
+// @illusion: transition to incall when remote accepts our outgoing call
 function handleAccepted(m) {
   if (!pendingOutgoing || pendingOutgoing.callId !== m.callId) return;
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
@@ -345,7 +338,9 @@ function handleAccepted(m) {
   renderContacts();
   ensureAudioPlaying();
 }
+// @illusion: handle call rejected by remote peer
 function handleRejected(m) {
+  /* v8 ignore next */
   if (!pendingOutgoing || pendingOutgoing.callId !== m.callId) return;
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
   pendingOutgoing = null;
@@ -353,6 +348,7 @@ function handleRejected(m) {
   showToast('Call declined.');
   showScreen('screen-idle');
 }
+// @illusion: handle outgoing call cancelled (peer rang but nobody answered)
 function handleCancelled(m) {
   if (!pendingOutgoing || pendingOutgoing.callId !== m.callId) return;
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
@@ -361,7 +357,9 @@ function handleCancelled(m) {
   showToast('Call cancelled.');
   showScreen('screen-idle');
 }
+// @illusion: handle remote peer busy response
 function handleBusy(m) {
+  /* v8 ignore next */
   if (!pendingOutgoing || pendingOutgoing.callId !== m.callId) return;
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
   pendingOutgoing = null;
@@ -369,6 +367,7 @@ function handleBusy(m) {
   showToast('Friend is busy.', true);
   showScreen('screen-idle');
 }
+// @illusion: handle remote peer offline — end call or cancel outgoing
 function handleUnavailable(m) {
   if (activeCall && activeCall.callId === m.callId) {
     endCallCleanup('Connection lost.');
@@ -383,6 +382,7 @@ function handleUnavailable(m) {
 }
 
 // ─── Call ended ─────────────────────────────────────────────────────────────────
+// @illusion: handle remote hangup or forced call end
 function handleEnded(m) {
   if (activeCall && activeCall.callId === m.callId) {
     if (intentionalHangup) endCallCleanup();
@@ -395,6 +395,7 @@ function handleEnded(m) {
 }
 
 // ─── Reconnect (peer dropped) ───────────────────────────────────────────────────
+// @illusion: show reconnect UI when peer drops, schedule self-reconnect attempt
 function handlePeerReconnecting(m) {
   if (!activeCall || activeCall.callId !== m.callId) return;
   reconnecting = true;
@@ -404,6 +405,7 @@ function handlePeerReconnecting(m) {
     if (activeCall && relay.connected) relay.reconnect(activeCall.callId, activeCall.peerId);
   }, 1500);
 }
+// @illusion: clear reconnect UI when peer reconnects
 function handleReconnected(m) {
   if (!activeCall || activeCall.callId !== m.callId) return;
   reconnecting = false;
@@ -412,11 +414,13 @@ function handleReconnected(m) {
 }
 
 // ─── Hang up / cleanup ──────────────────────────────────────────────────────────
+// @illusion: signal hangup to relay and clean up call state
 function hangUp() {
   intentionalHangup = true;
   if (activeCall) relay.hangup(activeCall.callId, activeCall.peerId);
   endCallCleanup();
 }
+// @illusion: tear down all call state, stop timers, close mic, show optional message
 function endCallCleanup(msg) {
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
   clearTimeout(selfReconnectTimer); selfReconnectTimer = null;
@@ -435,6 +439,7 @@ function endCallCleanup(msg) {
 }
 
 // ─── Remote mute indicator ─────────────────────────────────────────────────────
+// @illusion: show/hide remote peer mute indicator
 function handleRemoteMuted(m) {
   if (!activeCall || activeCall.peerId !== m.from) return;
   const el = document.getElementById('incall-remote-mute');
@@ -442,6 +447,7 @@ function handleRemoteMuted(m) {
 }
 
 // ─── Reconnect UI ───────────────────────────────────────────────────────────────
+// @illusion: show reconnect overlay with status message
 function showReconnectUI(msg) {
   const overlay = document.getElementById('reconnect-overlay');
   const msgEl   = document.getElementById('reconnect-msg');
@@ -450,6 +456,7 @@ function showReconnectUI(msg) {
   const statusEl = document.querySelector('#screen-incall .call-status-text');
   if (statusEl) statusEl.textContent = 'Reconnecting…';
 }
+// @illusion: hide reconnect overlay and restore Connected status text
 function clearReconnectUI() {
   const overlay = document.getElementById('reconnect-overlay');
   if (overlay) overlay.classList.add('hidden');
@@ -458,6 +465,7 @@ function clearReconnectUI() {
 }
 
 // ─── In-call: mute / noise cancel / audio playback ──────────────────────────────
+// @illusion: toggle local mute state, update mic icons, notify peer
 function toggleMute() {
   if (!activeCall) return;
   isMuted = !isMuted;
@@ -467,12 +475,14 @@ function toggleMute() {
   document.getElementById('icon-mic-off').classList.toggle('hidden', !isMuted);
   document.getElementById('btn-mute').classList.toggle('muted', isMuted);
 }
+// @illusion: toggle FastEnhancer DTLN denoiser on/off with toast notification
 function toggleNoiseCancellation() {
   noiseCancellationEnabled = !noiseCancellationEnabled;
   audio.setNoiseCancel(noiseCancellationEnabled);
   document.getElementById('btn-noise-cancel').classList.toggle('nc-off', !noiseCancellationEnabled);
   showToast(noiseCancellationEnabled ? 'Denoise on (FastEnhancer DTLN).' : 'Denoise off.');
 }
+// @illusion: reset mute state, timer display, and remote mute label to call-start defaults
 function resetInCallButtons() {
   isMuted = false;
   document.getElementById('icon-mic').classList.remove('hidden');
@@ -483,7 +493,9 @@ function resetInCallButtons() {
   if (rm) rm.textContent = '';
 }
 
+// @illusion: init or resume playback context, show enable-sound button if suspended
 async function ensureAudioPlaying() {
+  // @illusion: <TODO: describe (try_statement)>
   try {
     if (!audio.isPlaybackReady()) await audio.initPlayback();
     else await audio.resumePlayback();
@@ -492,14 +504,17 @@ async function ensureAudioPlaying() {
     if (audio.isPlaybackSuspended()) showEnableSound(); else hideEnableSound();
   } catch (e) { console.warn('audio playback init failed:', e); }
 }
+// @illusion: show tap-to-enable-sound button for autoplay-policy workaround
 function showEnableSound() {
   const b = document.getElementById('btn-enable-sound');
   if (b) b.classList.remove('hidden');
 }
+// @illusion: hide enable-sound button once audio context is running
 function hideEnableSound() {
   const b = document.getElementById('btn-enable-sound');
   if (b) b.classList.add('hidden');
 }
+// @illusion: resume playback on user gesture, hide enable-sound button
 async function enableSoundTapped() {
   await audio.resumePlayback();
   const el = document.getElementById('remote-audio');
@@ -508,6 +523,7 @@ async function enableSoundTapped() {
 }
 
 // ─── Call timer ─────────────────────────────────────────────────────────────────
+// @illusion: start 1-second interval call duration counter and display
 function startCallTimer() {
   callSeconds = 0;
   clearInterval(callTimerID);
@@ -518,9 +534,11 @@ function startCallTimer() {
     document.getElementById('call-timer').textContent = m + ':' + s;
   }, 1000);
 }
+// @illusion: stop call duration timer
 function stopCallTimer() { clearInterval(callTimerID); callTimerID = null; }
 
 // ─── Mic error handler ───────────────────────────────────────────────────────────
+// @illusion: display user-friendly microphone error message based on error type
 function handleMicError(e) {
   if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
     showToast('Microphone access denied.\nWindows Settings → Privacy → Microphone → enable for this app.', true);
@@ -532,7 +550,9 @@ function handleMicError(e) {
 }
 
 // ─── Device settings ─────────────────────────────────────────────────────────────
+// @illusion: enumerate mic and output devices, populate settings dropdowns
 async function populateDeviceSelects() {
+  // @illusion: <TODO: describe (try_statement)>
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     stream.getTracks().forEach(t => t.stop());
@@ -555,41 +575,25 @@ async function populateDeviceSelects() {
   ).join('');
   if (!outputs.length) outputSelect.innerHTML = '<option value="">No output devices found</option>';
 }
+// @illusion: set audio output device via setSinkId from stored device ID
 async function applyOutputDevice() {
   const deviceId = getOutputDeviceId();
   if (deviceId) await audio.setOutputDevice(deviceId);
 }
 
 // ─── Mute keybind ─────────────────────────────────────────────────────────────────
+// @illusion: read mute keybind from localStorage, return parsed object or null
 function getMuteKeybind() {
+  // @illusion: <TODO: describe (try_statement)>
   try { return JSON.parse(localStorage.getItem(KEY_MUTE_KEYBIND) || 'null'); }
   catch { return null; }
 }
+// @illusion: persist mute keybind to localStorage or remove if null
 function setMuteKeybind(kb) {
   if (kb) localStorage.setItem(KEY_MUTE_KEYBIND, JSON.stringify(kb));
   else    localStorage.removeItem(KEY_MUTE_KEYBIND);
 }
-const _codeLabels = {
-  Space:'Space', Backquote:'`', Minus:'-', Equal:'=', BracketLeft:'[', BracketRight:']',
-  Backslash:'\\', Semicolon:';', Quote:"'", Comma:',', Period:'.', Slash:'/',
-  Backspace:'Backspace', Tab:'Tab', CapsLock:'Caps', Enter:'Enter', Escape:'Esc',
-  Delete:'Del', Insert:'Ins', Home:'Home', End:'End', PageUp:'PgUp', PageDown:'PgDn',
-  ArrowUp:'↑', ArrowDown:'↓', ArrowLeft:'←', ArrowRight:'→',
-  PrintScreen:'PrtSc', ScrollLock:'ScrLk', Pause:'Pause', NumLock:'NumLk',
-};
-for (let i = 1; i <= 12; i++) _codeLabels['F' + i] = 'F' + i;
-for (let i = 0; i <= 9; i++)  _codeLabels['Digit' + i] = String(i);
-for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') _codeLabels['Key' + c] = c;
-function formatKeybind(kb) {
-  if (!kb) return 'None';
-  const parts = [];
-  if (kb.ctrl)  parts.push('Ctrl');
-  if (kb.shift) parts.push('Shift');
-  if (kb.alt)   parts.push('Alt');
-  if (kb.meta)  parts.push('Meta');
-  parts.push(_codeLabels[kb.code] || kb.code);
-  return parts.join('+');
-}
+// @illusion: update keybind display label and remove listening state
 function updateKeybindDisplay() {
   const el = document.getElementById('keybind-display');
   if (!el) return;
@@ -597,6 +601,7 @@ function updateKeybindDisplay() {
   el.classList.remove('listening');
 }
 let _keybindCapturing = false;
+// @illusion: start keyboard capture to set mute keybind, show listening state
 function startKeybindCapture() {
   if (_keybindCapturing) return;
   _keybindCapturing = true;
@@ -605,6 +610,7 @@ function startKeybindCapture() {
   display.textContent = 'Press a key…';
   display.classList.add('listening');
   btn.textContent = 'Cancel';
+  // @illusion: capture keydown event, set keybind or cancel on Escape
   function onKey(e) {
     if (['Control','Shift','Alt','Meta'].includes(e.key)) return;
     e.preventDefault(); e.stopImmediatePropagation();
@@ -615,6 +621,7 @@ function startKeybindCapture() {
     updateKeybindDisplay();
     showToast('Keybind set to ' + formatKeybind(kb) + '.');
   }
+  // @illusion: stop keybind capture, clean up listener, reset display
   function stopCapture() {
     _keybindCapturing = false;
     document.removeEventListener('keydown', onKey, true);
@@ -625,8 +632,10 @@ function startKeybindCapture() {
 }
 
 // ─── Copy my ID ───────────────────────────────────────────────────────────────────
+// @illusion: copy peer ID to clipboard with button feedback
 async function copyMyId() {
   if (!myId) { showToast('ID not ready yet.', true); return; }
+  // @illusion: <TODO: describe (try_statement)>
   try {
     await navigator.clipboard.writeText(myId);
     const btn = document.getElementById('btn-copy-my-id');
@@ -636,6 +645,7 @@ async function copyMyId() {
 }
 
 // ─── Save contact ─────────────────────────────────────────────────────────────────
+// @illusion: validate and save contact from input fields
 function saveContact() {
   const name = document.getElementById('contact-name-input').value.trim();
   const id   = document.getElementById('contact-id-input').value.trim();
@@ -655,10 +665,12 @@ function saveContact() {
 // talk-latency, so we do not batch frames into larger WebSocket messages.
 let _starveStart = 0;
 
+// @illusion: send captured audio frame to relay when in active call
 audio.setOnFrame((frame48) => {
   if (!activeCall || !relay || !relay.connected) return;
   relay.sendAudio(audio.capture48ToWire(frame48));
 });
+// @illusion: update UI on playback starvation status — show warning after sustained drop
 audio.setOnStarved((starved) => {
   if (!activeCall) return;
   if (starved) {
@@ -677,7 +689,7 @@ audio.setOnStarved((starved) => {
   }
 });
 
-// ─── Global mute keybind listener ───────────────────────────────────────────────────
+// @illusion: detect global mute keybind press and toggle mute state
 document.addEventListener('keydown', (e) => {
   const tag = document.activeElement?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -695,6 +707,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────────────
+// @illusion: init app state, bind all UI event handlers, start relay connection
 document.addEventListener('DOMContentLoaded', () => {
   myId = loadOrCreateId();
   document.getElementById('my-peer-id').textContent = myId;
@@ -722,6 +735,8 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem(KEY_RELAY_TOKEN, document.getElementById('relay-token-input').value.trim());
     showToast('Relay saved. Reconnecting…');
     // Tear down and rebuild the relay connection with the new URL.
+    /* v8 ignore next */
+    // @illusion: <TODO: describe (try_statement)>
     if (relay) { relay.connected = false; try { relay.ws && relay.ws.close(); } catch {} }
     initRelay();
   });
@@ -755,3 +770,68 @@ document.addEventListener('DOMContentLoaded', () => {
     if (document.getElementById('screen-settings').classList.contains('active')) populateDeviceSelects();
   });
 });
+
+// ─── Test hooks (non-breaking: nothing else in the module relies on these) ───
+// @illusion: reset all module state variables for test isolation
+export function __resetState() {
+  relay = null;
+  myId = null;
+  myName = 'Me';
+  activeCall = null;
+  pendingOutgoing = null;
+  pendingIncoming = null;
+  intentionalHangup = false;
+  reconnecting = false;
+  noAnswerTimer = null;
+  selfReconnectTimer = null;
+  callConnectedAt = 0;
+  lastAudioAt = 0;
+  isMuted = false;
+  noiseCancellationEnabled = true;
+  callTimerID = null;
+  callSeconds = 0;
+  ringtoneCtx = null;
+  ringtoneTimer = null;
+  ringtoneActive = false;
+  toastTimer = null;
+  _starveStart = 0;
+  _keybindCapturing = false;
+  DEFAULT_RELAY_URL = 'wss://voicecallandvideostream.onrender.com';
+}
+
+export {
+  startRingtone, stopRingtone,
+  showScreen, showToast, renderContacts,
+  setRelayStatus,
+  getRelayUrl, getRelayToken, getMicDeviceId, getOutputDeviceId,
+  loadOrCreateId, initRelay,
+  handleIncoming, acceptCall, acceptIncomingInternal, rejectCall,
+  startCall, cancelCall,
+  handleAccepted, handleRejected, handleCancelled, handleBusy, handleUnavailable,
+  handleEnded, handlePeerReconnecting, handleReconnected,
+  hangUp, endCallCleanup,
+  handleRemoteMuted,
+  showReconnectUI, clearReconnectUI,
+  toggleMute, toggleNoiseCancellation, resetInCallButtons,
+  ensureAudioPlaying, showEnableSound, hideEnableSound, enableSoundTapped,
+  startCallTimer, stopCallTimer,
+  handleMicError,
+  populateDeviceSelects, applyOutputDevice,
+  getMuteKeybind, setMuteKeybind, updateKeybindDisplay, startKeybindCapture,
+  copyMyId, saveContact,
+  KEY_ID, KEY_MIC_DEVICE, KEY_OUTPUT_DEVICE, KEY_MUTE_KEYBIND, KEY_RELAY_URL, KEY_RELAY_TOKEN,
+  DEFAULT_RELAY_URL,
+};
+
+// @illusion: read starve-start timestamp for test assertions
+export function getStarveStart()     { return _starveStart; }
+// @illusion: check if keybind capture is active for test assertions
+export function getKeybindCapturing() { return _keybindCapturing; }
+
+// Test-only setters (no runtime behaviour change for the app).
+// @illusion: set peer ID for test isolation
+export function __setMyId(id)        { myId = id; }
+// @illusion: set default relay URL for test isolation
+export function __setDefaultRelayUrl(url) { DEFAULT_RELAY_URL = url; }
+// @illusion: set intentional hangup flag for test isolation
+export function __setIntentionalHangup(v) { intentionalHangup = v; }

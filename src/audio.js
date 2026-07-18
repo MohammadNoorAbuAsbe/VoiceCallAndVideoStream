@@ -15,6 +15,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { loadModel } from './assets/fastenhancer/api/index.js';
+import { frameToBytes, int16ToFloat32, createNoiseGate } from './audio-codec.js';
 
 const MODEL_SIZE = 'base';   // 'tiny' | 'base' | 'small' — bump to 'small' for max NS
 
@@ -29,7 +30,10 @@ let denoiser     = null;     // FastEnhancer DTLN instance (main thread)
 let onFrame      = null;     // (Float32Array@48k) => void
 let onStarved    = null;     // (boolean) => void
 
-/** Acquire the mic and start the capture graph. Resolves with the raw stream. */
+// Noise gate (stateful) used after the denoiser in the capture path.
+const noiseGate  = createNoiseGate();
+
+// @illusion: acquire mic, create capture AudioContext+worklet, load neural denoiser
 export async function initCapture(micDeviceId, noiseCancelEnabled) {
   noiseCancel = noiseCancelEnabled;
 
@@ -79,74 +83,38 @@ export async function initCapture(micDeviceId, noiseCancelEnabled) {
 // ─── Capture frame processing (main thread) ──────────────────────────────────
 // Runs the DTLN denoiser (when enabled) followed by a noise gate that mutes
 // near-silence so residual AC hum / keyboard tails between sentences are cut.
+// @illusion: run DTLN denoiser (if enabled) then noise gate on capture frame
 function processCaptureFrame(frame) {
   if (noiseCancel && denoiser) {
     try { frame = denoiser.processFrame(frame); }
     catch (e) { console.warn('[audio] denoiser frame failed:', e); }
-    return applyNoiseGate(frame);
+    return noiseGate.process(frame);
   }
   return frame;
 }
 
-// Noise gate state.
-let _gateOpen = false;
-let _gateEnv  = 0;
-const GATE_OPEN_DB   = -36;   // open (let audio through) above this peak level
-const GATE_CLOSE_DB  = -46;   // close (mute) below this peak level (hysteresis)
-const GATE_ATTACK    = 0.08;  // ramp-up smoothing per frame when opening
-const GATE_RELEASE   = 0.85;  // fast fade per frame when closing
-const _gateOpenLin   = Math.pow(10, GATE_OPEN_DB / 20);
-const _gateCloseLin  = Math.pow(10, GATE_CLOSE_DB / 20);
-
-function applyNoiseGate(frame) {
-  let peak = 0;
-  for (let i = 0; i < frame.length; i++) {
-    const a = frame[i] < 0 ? -frame[i] : frame[i];
-    if (a > peak) peak = a;
-  }
-  if (peak > _gateOpenLin) _gateOpen = true;
-  else if (peak < _gateCloseLin) _gateOpen = false;
-
-  _gateEnv = _gateOpen
-    ? Math.min(1, _gateEnv + GATE_ATTACK)
-    : Math.max(0, _gateEnv - GATE_RELEASE);
-
-  if (_gateEnv >= 1) return frame;            // fully open — no copy
-  const out = new Float32Array(frame.length); // closed → zeros
-  if (_gateEnv > 0) {
-    for (let i = 0; i < frame.length; i++) out[i] = frame[i] * _gateEnv;
-  }
-  return out;
-}
-
+// @illusion: set callback for processed capture frames
 export function setOnFrame(cb)     { onFrame = cb; }
+// @illusion: set callback for playback starvation status
 export function setOnStarved(cb)   { onStarved = cb; }
 
+// @illusion: set local mute state
 export function setMuted(value) {
   muted = value;
 }
 
+// @illusion: enable or disable noise cancellation flag
 export function setNoiseCancel(value) {
   noiseCancel = value;
 }
 
-/** Convert Float32 PCM → Int16 ArrayBuffer for WebSocket binary send. */
-export function frameToBytes(frame) {
-  const buf = new ArrayBuffer(frame.length * 2);
-  const view = new DataView(buf);
-  for (let i = 0; i < frame.length; i++) {
-    let s = Math.max(-1, Math.min(1, frame[i]));
-    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-  }
-  return buf;
-}
-
-/** Wrap an incoming 48 kHz frame as bytes, sent verbatim (no resampling). */
+// @illusion: convert Float32 frame to Int16 wire bytes for relay transport
 export function capture48ToWire(frame48) {
   return frameToBytes(frame48);
 }
 
 // ─── Playback ────────────────────────────────────────────────────────────────
+// @illusion: create playback AudioContext, player worklet, route through hidden audio element
 export async function initPlayback() {
   playCtx = new AudioContext({ sampleRate: 48000 });
   await playCtx.resume();
@@ -169,23 +137,25 @@ export async function initPlayback() {
   };
 }
 
+// @illusion: resume suspended playback context after user gesture
 export async function resumePlayback() {
   if (playCtx) { try { await playCtx.resume(); } catch {} }
 }
 
+// @illusion: check if playback pipeline is initialized
 export function isPlaybackReady()   { return !!playerNode; }
+// @illusion: check if playback context is in suspended state
 export function isPlaybackSuspended(){ return !!playCtx && playCtx.state === 'suspended'; }
 
-/** Feed an Int16 ArrayBuffer received from the relay into the player. */
+// @illusion: feed received Int16 audio buffer to player worklet for playback
 export function playBytes(arrayBuffer) {
   if (!playerNode) return;
-  const int16 = new Int16Array(arrayBuffer);
-  const f = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) f[i] = int16[i] / 0x8000;
+  const f = int16ToFloat32(arrayBuffer);
   playerNode.port.postMessage(f);
 }
 
 // ─── Output device (speaker) ──────────────────────────────────────────────────
+// @illusion: route audio to specified output device via setSinkId
 export async function setOutputDevice(deviceId) {
   const audioEl = document.getElementById('remote-audio');
   if (audioEl && typeof audioEl.setSinkId === 'function' && deviceId) {
@@ -193,6 +163,7 @@ export async function setOutputDevice(deviceId) {
   }
 }
 
+// @illusion: tear down capture graph, stop mic tracks, destroy denoiser
 export function closeCapture() {
   if (denoiser) { try { denoiser.destroy(); } catch (_) {} denoiser = null; }
   if (captureStream) { captureStream.getTracks().forEach(t => t.stop()); captureStream = null; }
@@ -200,6 +171,7 @@ export function closeCapture() {
   captureNode = null;
 }
 
+// @illusion: close playback context and release player node
 export function closePlayback() {
   if (playCtx) { playCtx.close().catch(() => {}); playCtx = null; }
   playerNode = null;

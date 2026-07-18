@@ -13,6 +13,9 @@ dist
 dist-ssr
 *.local
 
+# Test coverage
+coverage/
+
 # Rust / Tauri build artifacts (can be gigabytes)
 src-tauri/target/
 

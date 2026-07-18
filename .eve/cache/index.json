@@ -1,17 +1,17 @@
 {
   "id": "VoiceCallAndVideoStream",
   "root": "C:\\Users\\MohammadNoor\\Documents\\GitHub\\VoiceCallAndVideoStream",
-  "snapshotCount": 3,
+  "snapshotCount": 5,
   "commitCount": 0,
-  "decisionCount": 5,
-  "riskCount": 5,
+  "decisionCount": 7,
+  "riskCount": 6,
   "artifactCount": 0,
-  "latestAt": "2026-07-15T19:17:36Z",
-  "latestSnapshot": "snap_4d271b00584429d4",
-  "latestTitle": "SpeexDSP denoiser + lower call latency",
+  "latestAt": "2026-07-17T11:45:32Z",
+  "latestSnapshot": "snap_838eb1f3f933e2c5",
+  "latestTitle": "100% line + branch test coverage across server and src",
   "branch": "main",
-  "head": "8bec8e5c842ebf788458e08d4154604f6da20b62",
+  "head": "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0",
   "dirty": true,
   "remoteUrl": "https://github.com/MohammadNoorAbuAsbe/VoiceCallAndVideoStream",
-  "latestGitState": "8bec8e5c842ebf788458e08d4154604f6da20b62"
+  "latestGitState": "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0"
 }

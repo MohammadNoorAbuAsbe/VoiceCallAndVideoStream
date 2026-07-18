@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "0.1.0",
+  "id": "skip_f5df9a4ff346c193",
+  "repoId": "VoiceCallAndVideoStream",
+  "branch": "main",
+  "reason": "Graphify integration is complete but the repo already had many pre-existing uncommitted changes and the user did not ask to commit; EVE requires a clean/committed working tree for a snapshot. The work itself (uv+graphifyy install, OpenCode skill registration, code-only graph build, and verified explain/path/query) is finished.",
+  "range": {
+    "from": "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0",
+    "to": "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0",
+    "commits": [
+      "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0"
+    ]
+  },
+  "createdAt": "2026-07-18T15:37:39Z",
+  "agent": {}
+}

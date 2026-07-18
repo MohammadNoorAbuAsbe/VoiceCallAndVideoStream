@@ -10,13 +10,16 @@
 const FRAME  = 512;   // DTLN native frame @ 48 kHz
 const QSIZE  = 128;   // Web Audio render quantum
 
+// @illusion: accumulate 128-sample quanta into 512-sample Float32 frames, post to main thread
 class CaptureProcessor extends AudioWorkletProcessor {
+  // @illusion: init internal 512-sample buffer and counter
   constructor() {
     super();
     this._buf   = new Float32Array(FRAME);
     this._count = 0;
   }
 
+  // @illusion: accumulate 128-sample quanta, post full 512-sample frame to main thread
   process(inputs, _outputs) {
     const inp = inputs[0]?.[0];
     const src = inp ?? new Float32Array(QSIZE);

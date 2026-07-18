@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "0.1.0",
+  "id": "skip_1d2e1419a9c4bc20",
+  "repoId": "VoiceCallAndVideoStream",
+  "branch": "main",
+  "reason": "Adding @illusion annotation comments to all source files. No behavior changes — purely adding code documentation comments as required by the Code Illusion De-tangler standard.",
+  "range": {
+    "from": "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0",
+    "to": "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0",
+    "commits": [
+      "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0"
+    ]
+  },
+  "createdAt": "2026-07-17T16:47:09Z",
+  "agent": {}
+}

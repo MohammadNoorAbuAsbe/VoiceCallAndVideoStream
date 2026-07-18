@@ -5,9 +5,11 @@
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// @illusion: build Tauri app with window, system tray, and close-to-tray behavior
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // @illusion: create main window and system tray with Show/Quit menu
         .setup(|app| {
             // Build the main window programmatically for full control over sizing.
             let _win =
@@ -27,6 +29,7 @@ pub fn run() {
                 .menu(&menu)
                 .tooltip("VoiceCall")
                 .icon(app.default_window_icon().unwrap().clone())
+                // @illusion: handle Show/Quit tray menu actions
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(w) = app.get_webview_window("main") {
@@ -37,6 +40,7 @@ pub fn run() {
                     "quit" => app.exit(0),
                     _ => {}
                 })
+                // @illusion: show window on left-click tray icon
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -55,6 +59,7 @@ pub fn run() {
 
             Ok(())
         })
+        // @illusion: minimize to tray on close instead of quitting
         .on_window_event(|window, event| {
             // Minimise to tray instead of quitting on close.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

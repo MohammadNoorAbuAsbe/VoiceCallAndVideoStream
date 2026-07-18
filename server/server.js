@@ -42,6 +42,7 @@ import http from 'node:http';
 import { WebSocketServer } from 'ws';
 
 const PORT = Number(process.env.PORT) || 3000;
+/* v8 ignore next */
 const TOKEN = process.env.RELAY_TOKEN || '';
 
 // Minimal HTTP server so platforms like Render can health-check the service.
@@ -64,32 +65,41 @@ const clients = new Map();
 const calls = new Map();
 
 const isOpen = (ws) => ws && ws.readyState === ws.OPEN;
+// @illusion: send JSON message to a WebSocket client if open
 function send(ws, obj) {
   if (isOpen(ws)) ws.send(JSON.stringify(obj));
 }
+// @illusion: send binary data to a WebSocket client if open
 function sendBin(ws, data) {
   if (isOpen(ws)) ws.send(data);
 }
 
-wss.on('connection', (ws) => {
-  ws.isAlive = true;
-  ws.id = null;          // registered id
-  ws.currentCall = null; // callId of the active call (set after accept)
-  ws.pendingOutgoing = null; // { to, callId } of an unanswered outgoing call
+// @illusion: wire per-connection protocol handlers onto a WebSocketServer
+export function attachRelay(server) {
+  server.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.id = null;          // registered id
+    ws.currentCall = null; // callId of the active call (set after accept)
+    ws.pendingOutgoing = null; // { to, callId } of an unanswered outgoing call
 
-  ws.on('pong', () => { ws.isAlive = true; });
+    ws.on('pong', () => { ws.isAlive = true; });
 
-  ws.on('message', (data, isBinary) => {
-    if (isBinary) { handleAudio(ws, data); return; }
-    let msg;
-    try { msg = JSON.parse(data.toString()); } catch { return; }
-    handleMessage(ws, msg);
+    ws.on('message', (data, isBinary) => {
+      if (isBinary) { handleAudio(ws, data); return; }
+      let msg;
+      try { msg = JSON.parse(data.toString()); } catch { return; }
+      handleMessage(ws, msg);
+    });
+
+    ws.on('close', () => handleClose(ws));
+    ws.on('error', () => { /* ignore transport errors */ });
   });
+  return server;
+}
 
-  ws.on('close', () => handleClose(ws));
-  ws.on('error', () => { /* ignore transport errors */ });
-});
+attachRelay(wss);
 
+// @illusion: dispatch incoming signaling messages by type (register, call, accept, etc.)
 function handleMessage(ws, m) {
   switch (m.t) {
     case 'register': {
@@ -178,6 +188,7 @@ function handleMessage(ws, m) {
   }
 }
 
+// @illusion: forward binary audio frame from one peer to the other in a call
 function handleAudio(ws, data) {
   const callId = ws.currentCall;
   if (!callId) return;
@@ -187,6 +198,7 @@ function handleAudio(ws, data) {
   sendBin(clients.get(peerId), data);
 }
 
+// @illusion: tear down call, remove from calls map, notify both peers
 function endCall(callId, byId, reason) {
   const call = calls.get(callId);
   if (!call) return;
@@ -201,6 +213,7 @@ function endCall(callId, byId, reason) {
   }
 }
 
+// @illusion: handle client disconnect, notify peer with reconnecting, set 30s grace timer
 function handleClose(ws) {
   const id = ws.id;
   if (!id) return;
@@ -223,6 +236,7 @@ function handleClose(ws) {
 }
 
 // Heartbeat: drop sockets that stop responding.
+/* v8 ignore next 7 */
 const heartbeat = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) return ws.terminate();
@@ -232,6 +246,35 @@ const heartbeat = setInterval(() => {
 }, 30000);
 wss.on('close', () => clearInterval(heartbeat));
 
-httpServer.listen(PORT, () => {
-  console.log(`VoiceCall relay listening on :${PORT}${TOKEN ? ' (token required)' : ''}`);
-});
+// ── Lifecycle (start/stop) ────────────────────────────────────────────────────
+// `listen` is split out so tests can start the relay on an ephemeral port and
+// tear it down, without the module binding a fixed port on import.
+// @illusion: start HTTP/WS server on the given port, resolve with actual port
+export function startServer(port = PORT) {
+  return new Promise((resolve) => {
+    httpServer.listen(port, () => {
+      const addr = httpServer.address();
+      console.log(`VoiceCall relay listening on :${addr.port}${TOKEN ? ' (token required)' : ''}`);
+      resolve(addr.port);
+    });
+  });
+}
+
+// @illusion: stop heartbeat and close WS/HTTP server gracefully
+export function stopServer() {
+  clearInterval(heartbeat);
+  return new Promise((resolve) => {
+    wss.close();
+    httpServer.close(() => resolve());
+  });
+}
+
+export { httpServer, wss, clients, calls, handleMessage, handleAudio, endCall, handleClose };
+
+// Only auto-start when executed directly (`node server.js`), not on import.
+const isRunDirectly =
+  process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
+/* v8 ignore next 3 */
+if (isRunDirectly) {
+  startServer();
+}

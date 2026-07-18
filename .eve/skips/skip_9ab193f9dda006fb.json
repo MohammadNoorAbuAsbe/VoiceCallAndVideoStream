@@ -1,0 +1,16 @@
+{
+  "schemaVersion": "0.1.0",
+  "id": "skip_9ab193f9dda006fb",
+  "repoId": "VoiceCallAndVideoStream",
+  "branch": "main",
+  "reason": "Read-only project review/assessment; no code changes made.",
+  "range": {
+    "from": "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0",
+    "to": "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0",
+    "commits": [
+      "5ed9b3e7698fecc47870f011da8c0e6beb79d6e0"
+    ]
+  },
+  "createdAt": "2026-07-18T15:46:46Z",
+  "agent": {}
+}
