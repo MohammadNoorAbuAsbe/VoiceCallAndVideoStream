@@ -1,17 +1,17 @@
 {
   "id": "VoiceCallAndVideoStream",
   "root": "C:\\Users\\MohammadNoor\\Documents\\GitHub\\VoiceCallAndVideoStream",
-  "snapshotCount": 6,
-  "commitCount": 0,
-  "decisionCount": 7,
-  "riskCount": 6,
+  "snapshotCount": 7,
+  "commitCount": 2,
+  "decisionCount": 11,
+  "riskCount": 8,
   "artifactCount": 0,
-  "latestAt": "2026-07-18T16:09:57Z",
-  "latestSnapshot": "snap_eda1557ccecf701c",
-  "latestTitle": "Add Vitest test suite and refactor for testability",
+  "latestAt": "2026-07-18T17:43:59Z",
+  "latestSnapshot": "snap_b6e400ce37635dfe",
+  "latestTitle": "End-to-end encrypted calls with key-derived identities",
   "branch": "main",
-  "head": "91e20a33fe598791a3c433288829d9e3dfa21bfa",
+  "head": "54ceafc9ad2e8d1a432ecfca6b31fb7b06e391cb",
   "dirty": true,
   "remoteUrl": "https://github.com/MohammadNoorAbuAsbe/VoiceCallAndVideoStream",
-  "latestGitState": "91e20a33fe598791a3c433288829d9e3dfa21bfa"
+  "latestGitState": "54ceafc9ad2e8d1a432ecfca6b31fb7b06e391cb"
 }
