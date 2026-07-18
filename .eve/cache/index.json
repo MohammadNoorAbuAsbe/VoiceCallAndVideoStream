@@ -1,17 +1,17 @@
 {
   "id": "VoiceCallAndVideoStream",
   "root": "C:\\Users\\MohammadNoor\\Documents\\GitHub\\VoiceCallAndVideoStream",
-  "snapshotCount": 8,
+  "snapshotCount": 9,
   "commitCount": 2,
   "decisionCount": 14,
   "riskCount": 10,
   "artifactCount": 0,
-  "latestAt": "2026-07-18T18:57:27Z",
-  "latestSnapshot": "snap_348a6f6f20585c40",
-  "latestTitle": "Reduce voice-call talk-latency (Israel/Render)",
+  "latestAt": "2026-07-18T19:04:24Z",
+  "latestSnapshot": "snap_6a8bbda415b1f92d",
+  "latestTitle": "Reduce call latency: off-thread denoiser, frame batching, TCP no-delay",
   "branch": "main",
-  "head": "63bad25a965a205616575fb75cc09a675d028e4a",
+  "head": "5e2a67f08925c21bc5a68bae44141f2434c33990",
   "dirty": true,
   "remoteUrl": "https://github.com/MohammadNoorAbuAsbe/VoiceCallAndVideoStream",
-  "latestGitState": "63bad25a965a205616575fb75cc09a675d028e4a"
+  "latestGitState": "5e2a67f08925c21bc5a68bae44141f2434c33990"
 }
