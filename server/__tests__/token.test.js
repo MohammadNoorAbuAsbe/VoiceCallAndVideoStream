@@ -2,6 +2,7 @@
 // import a FRESH copy of the server (cache-busted query) with the token set.
 import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
 import { WebSocket } from 'ws';
+import { generateIdentity } from '../../src/crypto.js';
 
 let mod;
 let port;
@@ -19,6 +20,8 @@ afterAll(async () => {
   delete process.env.RELAY_TOKEN;
 });
 afterEach(() => {
+  mod.clients.clear();
+  mod.calls.clear();
   for (const c of created) { try { c.close(); } catch { /* noop */ } }
   created.length = 0;
 });
@@ -42,26 +45,37 @@ function client() {
   return c;
 }
 
+// Complete the register → challenge → auth handshake, optionally with a token.
+async function register(c, ident, token) {
+  c.send({ t: 'register', id: ident.id, pubKey: ident.publicKeyB64, token });
+  const ch = await c.waitFor('challenge');
+  const sig = await ident.sign(Buffer.from(ch.nonce, 'base64'));
+  c.send({ t: 'auth', id: ident.id, sig });
+  return c.waitFor('registered');
+}
+
 it('denies registration without the token', async () => {
   const c = client();
   await c.open();
-  c.send({ t: 'register', id: 'no-token' });
+  const ident = await generateIdentity();
+  c.send({ t: 'register', id: ident.id, pubKey: ident.publicKeyB64 });
   const denied = await c.waitFor('register-denied');
-  expect(denied.t).toBe('register-denied');
+  expect(denied.reason).toBe('token');
 });
 
 it('allows registration with the correct token', async () => {
   const c = client();
   await c.open();
-  c.send({ t: 'register', id: 'with-token', token: 'topsecret' });
-  const reg = await c.waitFor('registered');
-  expect(reg.id).toBe('with-token');
+  const ident = await generateIdentity();
+  const reg = await register(c, ident, 'topsecret');
+  expect(reg.id).toBe(ident.id);
 });
 
 it('denies registration with a wrong token', async () => {
   const c = client();
   await c.open();
-  c.send({ t: 'register', id: 'wrong-token', token: 'nope' });
+  const ident = await generateIdentity();
+  c.send({ t: 'register', id: ident.id, pubKey: ident.publicKeyB64, token: 'nope' });
   const denied = await c.waitFor('register-denied');
-  expect(denied.t).toBe('register-denied');
+  expect(denied.reason).toBe('token');
 });

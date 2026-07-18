@@ -1,40 +1,46 @@
 // ─────────────────────────────────────────────────────────────────────────────
 //  Relay client — WebSocket connection + signaling protocol.
+//
+//  Registration is a two-step challenge/response: the client sends its id +
+//  public key, the server replies with a random `challenge`, and the client
+//  signs it (via the injected `auth.sign` callback) to prove it owns the id.
 //  Emits events the UI subscribes to via `on(type, cb)`.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { b64ToBytes } from './crypto.js';
+
 export class RelayClient {
-  // @illusion: init WebSocket relay client with URL, state, and event listeners map
   constructor(url) {
     this.url = url;
     this.ws = null;
     this.id = null;
     this.token = null;
+    this.auth = null;          // { pubKeyB64, sign(nonceBytes) => Promise<sigB64> }
     this.connected = false;
     this.reconnectTimer = null;
     this.heartbeat = null;
     this.listeners = new Map();
   }
 
-  // @illusion: register event listener for a given type, returns this for chaining
+  // Register an event listener for a type. Returns `this` for chaining.
   on(type, cb) {
     if (!this.listeners.has(type)) this.listeners.set(type, []);
     this.listeners.get(type).push(cb);
     return this;
   }
-  // @illusion: fire all registered listeners for an event type with detail payload
   _emit(type, detail) {
     (this.listeners.get(type) || []).forEach(cb => cb(detail));
   }
 
-  // @illusion: set peer ID and token, then open WebSocket connection
-  connect(id, token) {
+  // Open the connection. `auth` carries the public key + a signer used to
+  // answer the server's registration challenge.
+  connect(id, token, auth) {
     this.id = id;
     this.token = token || null;
+    this.auth = auth || null;
     this._open();
   }
 
-  // @illusion: open WebSocket, wire onopen/onmessage/onclose/onerror, start heartbeat
   _open() {
     let ws;
     try { ws = new WebSocket(this.url); }
@@ -44,7 +50,7 @@ export class RelayClient {
 
     ws.onopen = () => {
       this.connected = true;
-      this._send({ t: 'register', id: this.id, token: this.token });
+      this._send({ t: 'register', id: this.id, token: this.token, pubKey: this.auth ? this.auth.pubKeyB64 : undefined });
       this._emit('open');
       clearInterval(this.heartbeat);
       this.heartbeat = setInterval(() => this._send({ t: 'ping' }), 20000);
@@ -70,28 +76,35 @@ export class RelayClient {
     ws.onerror = () => {};
   }
 
-  // @illusion: schedule WebSocket reconnect attempt after 2-second delay
   _scheduleReconnect() {
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => this._open(), 2000);
   }
 
-  // @illusion: send JSON message via WebSocket if connection is open
   _send(obj) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(obj));
     }
   }
 
-  // @illusion: send binary audio frame via WebSocket
+  // Sign the server's challenge nonce and return the auth response.
+  async _answerChallenge(nonceB64) {
+    if (!this.auth || typeof this.auth.sign !== 'function') return;
+    try {
+      const sig = await this.auth.sign(b64ToBytes(nonceB64));
+      this._send({ t: 'auth', sig });
+    } catch { /* signing failed — server will time us out */ }
+  }
+
   sendAudio(bytes) {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(bytes);
   }
 
-  // @illusion: dispatch incoming JSON message by type to registered event listeners
   _onMessage(m) {
     switch (m.t) {
+      case 'challenge':         return this._answerChallenge(m.nonce);
       case 'registered':        this._emit('registered', m); break;
+      case 'register-denied':   this._emit('register-denied', m); break;
       case 'id-taken':          this._emit('id-taken', m); break;
       case 'incoming':          this._emit('incoming', m); break;
       case 'accepted':          this._emit('accepted', m); break;
@@ -103,23 +116,16 @@ export class RelayClient {
       case 'reconnecting':      this._emit('reconnecting', m); break;
       case 'reconnected':       this._emit('reconnected', m); break;
       case 'muted':             this._emit('muted', m); break;
-      default: break; // pong, register-denied, etc.
+      default: break; // pong, etc.
     }
   }
 
   // ── commands ──
-  // @illusion: send call signaling message to peer
-  call(to, name, callId)    { this._send({ t: 'call', to, name, callId }); }
-  // @illusion: send accept response to incoming call
-  accept(callId, to)        { this._send({ t: 'accept', callId, to }); }
-  // @illusion: send reject response to incoming call
+  call(to, callId, offer)   { this._send({ t: 'call', to, callId, offer }); }
+  accept(callId, to, answer){ this._send({ t: 'accept', callId, to, answer }); }
   reject(callId, to)        { this._send({ t: 'reject', callId, to }); }
-  // @illusion: cancel pending outgoing call
   cancel(callId, to)        { this._send({ t: 'cancel', callId, to }); }
-  // @illusion: hang up active call
   hangup(callId, to)        { this._send({ t: 'hangup', callId, to }); }
-  // @illusion: request reconnection of dropped call
   reconnect(callId, to)     { this._send({ t: 'reconnect', callId, to }); }
-  // @illusion: notify peer of mute state change
   sendMute(to, muted)       { this._send({ t: 'mute', to, muted }); }
 }

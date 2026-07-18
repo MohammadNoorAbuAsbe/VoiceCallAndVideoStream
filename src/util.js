@@ -46,9 +46,7 @@ export function formatKeybind(kb) {
   return parts.join('+');
 }
 
-// ─── ID / callId generation ──────────────────────────────────────────────────
-// @illusion: generate random peer ID with timestamp suffix
-export function generateId()    { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+// ─── Call ID generation ────────────────────────────────────────────────────────
 // @illusion: generate random call ID for signaling
 export function generateCallId(){ return Math.random().toString(36).slice(2, 12); }
 

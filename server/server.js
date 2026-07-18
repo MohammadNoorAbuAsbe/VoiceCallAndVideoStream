@@ -4,32 +4,36 @@
 //  A tiny WebSocket relay. Clients connect outbound (works through any NAT /
 //  firewall — no ICE / TURN / WebRTC needed). The server maps a peer "id" to a
 //  socket, forwards call-signaling messages, and shuttles raw binary audio
-//  frames between the two peers in a call. It does NOT decode or process audio.
+//  frames between the two peers in a call. It never sees plaintext: audio is
+//  end-to-end encrypted by the clients, and the key-exchange payloads it
+//  forwards are opaque.
+//
+//  Identity is unforgeable: a peer ID is the fingerprint of the client's
+//  Ed25519 public key, and registration requires signing a server challenge, so
+//  a client can only register an ID it actually owns.
 //
 //  Protocol (JSON unless marked binary):
 //    Client → Server
-//      register {id, token?}
-//      call     {to, name, callId}
-//      accept   {callId, to}
+//      register {id, pubKey, token?}   → server replies `challenge`
+//      auth     {sig}                  → signature over the challenge nonce
+//      call     {to, callId, offer}    (offer = signed X25519 key exchange)
+//      accept   {callId, to, answer}   (answer = signed X25519 key exchange)
 //      reject   {callId, to}
 //      cancel   {callId, to}
 //      hangup   {callId, to}
 //      reconnect{callId, to}
 //      mute     {to, muted}
 //      ping
-//      <binary>            → audio frame (forwarded to current call peer)
+//      <binary>                        → encrypted audio frame (forwarded)
 //    Server → Client
+//      challenge {nonce}
 //      registered {id}
+//      register-denied {reason}
 //      id-taken   {id}
-//      incoming   {from, name, callId}
-//      accepted   {callId, from, name}
-//      rejected   {callId}
-//      cancelled  {callId}
-//      ended      {callId}
-//      busy       {callId}
-//      peer-unavailable {callId}
-//      reconnecting {callId}
-//      reconnected  {callId}
+//      incoming   {from, callId, offer}
+//      accepted   {callId, from, answer}
+//      rejected / cancelled / ended / busy / peer-unavailable {callId}
+//      reconnecting / reconnected {callId}
 //      muted      {from, muted}
 //      pong
 //
@@ -39,11 +43,41 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import http from 'node:http';
+import { webcrypto } from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
+const subtle = webcrypto.subtle;
 const PORT = Number(process.env.PORT) || 3000;
 /* v8 ignore next */
 const TOKEN = process.env.RELAY_TOKEN || '';
+
+// ─── Identity verification helpers (mirror src/crypto.js) ────────────────────
+const B32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
+function bytesToB32(bytes) {
+  let out = '', bits = 0, value = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    value = (value << 8) | bytes[i];
+    bits += 8;
+    while (bits >= 5) { out += B32_ALPHABET[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) out += B32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+// Derive the canonical peer ID from an Ed25519 public key (base64).
+async function fingerprint(pubKeyB64) {
+  const raw = Buffer.from(pubKeyB64, 'base64');
+  const digest = new Uint8Array(await subtle.digest('SHA-256', raw));
+  return bytesToB32(digest.slice(0, 12));
+}
+// Verify an Ed25519 signature (base64) over `bytes` against a public key (base64).
+async function verifySig(pubKeyB64, sigB64, bytes) {
+  try {
+    const pub = await subtle.importKey('raw', Buffer.from(pubKeyB64, 'base64'), { name: 'Ed25519' }, true, ['verify']);
+    return await subtle.verify({ name: 'Ed25519' }, pub, Buffer.from(sigB64, 'base64'), bytes);
+  } catch {
+    return false;
+  }
+}
 
 // Minimal HTTP server so platforms like Render can health-check the service.
 // The WebSocket server upgrades the same HTTP listener.
@@ -65,21 +99,20 @@ const clients = new Map();
 const calls = new Map();
 
 const isOpen = (ws) => ws && ws.readyState === ws.OPEN;
-// @illusion: send JSON message to a WebSocket client if open
 function send(ws, obj) {
   if (isOpen(ws)) ws.send(JSON.stringify(obj));
 }
-// @illusion: send binary data to a WebSocket client if open
 function sendBin(ws, data) {
   if (isOpen(ws)) ws.send(data);
 }
 
-// @illusion: wire per-connection protocol handlers onto a WebSocketServer
+// Wire the per-connection protocol handlers onto a WebSocketServer.
 export function attachRelay(server) {
   server.on('connection', (ws) => {
     ws.isAlive = true;
-    ws.id = null;          // registered id
-    ws.currentCall = null; // callId of the active call (set after accept)
+    ws.id = null;              // registered id (set only after successful auth)
+    ws.pendingAuth = null;     // { id, pubKey, nonce } awaiting a signed challenge
+    ws.currentCall = null;     // callId of the active call (set after accept)
     ws.pendingOutgoing = null; // { to, callId } of an unanswered outgoing call
 
     ws.on('pong', () => { ws.isAlive = true; });
@@ -99,34 +132,59 @@ export function attachRelay(server) {
 
 attachRelay(wss);
 
-// @illusion: dispatch incoming signaling messages by type (register, call, accept, etc.)
-function handleMessage(ws, m) {
+// Dispatch incoming signaling messages by type.
+async function handleMessage(ws, m) {
   switch (m.t) {
+    // Step 1 of registration: client presents its id + public key. We verify
+    // the id is the key's fingerprint, then issue a random challenge.
     case 'register': {
-      if (TOKEN && m.token !== TOKEN) { send(ws, { t: 'register-denied' }); ws.close(); return; }
+      if (TOKEN && m.token !== TOKEN) { send(ws, { t: 'register-denied', reason: 'token' }); ws.close(); return; }
       const id = String(m.id || '').trim();
-      if (!id || clients.has(id)) { send(ws, { t: 'id-taken', id }); return; }
-      ws.id = id;
-      clients.set(id, ws);
-      send(ws, { t: 'registered', id });
-      console.log(`[+] ${id} registered (${clients.size} online)`);
+      const pubKey = String(m.pubKey || '');
+      if (!id || !pubKey) { send(ws, { t: 'register-denied', reason: 'missing' }); return; }
+      if ((await fingerprint(pubKey)) !== id) { send(ws, { t: 'register-denied', reason: 'id-mismatch' }); return; }
+      if (clients.has(id)) { send(ws, { t: 'id-taken', id }); return; }
+      const nonce = Buffer.from(webcrypto.getRandomValues(new Uint8Array(32))).toString('base64');
+      ws.pendingAuth = { id, pubKey, nonce };
+      send(ws, { t: 'challenge', nonce });
+      break;
+    }
+
+    // Step 2 of registration: client returns a signature over the challenge
+    // nonce, proving it holds the private key for the claimed id.
+    case 'auth': {
+      const pending = ws.pendingAuth;
+      if (!pending) { send(ws, { t: 'register-denied', reason: 'no-challenge' }); return; }
+      const ok = await verifySig(pending.pubKey, String(m.sig || ''), Buffer.from(pending.nonce, 'base64'));
+      if (!ok) { send(ws, { t: 'register-denied', reason: 'bad-signature' }); ws.close(); return; }
+      // A reconnect from the same identity (same public key) evicts the stale
+      // socket; a different key claiming an already-online id is rejected.
+      const existing = clients.get(pending.id);
+      if (existing && existing.pubKey !== pending.pubKey) { send(ws, { t: 'id-taken', id: pending.id }); return; }
+      if (existing && existing !== ws) { try { existing.close(); } catch { /* noop */ } clients.delete(pending.id); }
+      ws.id = pending.id;
+      ws.pubKey = pending.pubKey;
+      ws.pendingAuth = null;
+      clients.set(ws.id, ws);
+      send(ws, { t: 'registered', id: ws.id });
+      console.log(`[+] ${ws.id} registered (${clients.size} online)`);
       break;
     }
 
     case 'call': {
-      const { to, name, callId } = m;
+      const { to, callId, offer } = m;
       if (!ws.id) return;
       if (to === ws.id) return; // can't call yourself
       const target = clients.get(to);
       if (!target) { send(ws, { t: 'peer-unavailable', callId }); return; }
       if (target.currentCall) { send(ws, { t: 'busy', callId }); return; }
       ws.pendingOutgoing = { to, callId };
-      send(target, { t: 'incoming', from: ws.id, name: name || ws.id, callId });
+      send(target, { t: 'incoming', from: ws.id, callId, offer });
       break;
     }
 
     case 'accept': {
-      const { callId, to } = m;
+      const { callId, to, answer } = m;
       const caller = clients.get(to);
       if (!caller) { send(ws, { t: 'peer-unavailable', callId }); return; }
       calls.set(callId, { a: ws.id, b: to, accepted: true, dropTimer: null });
@@ -134,7 +192,7 @@ function handleMessage(ws, m) {
       caller.currentCall = callId;
       ws.pendingOutgoing = null;
       caller.pendingOutgoing = null;
-      send(caller, { t: 'accepted', callId, from: ws.id, name: ws.id });
+      send(caller, { t: 'accepted', callId, from: ws.id, answer });
       break;
     }
 
@@ -188,7 +246,7 @@ function handleMessage(ws, m) {
   }
 }
 
-// @illusion: forward binary audio frame from one peer to the other in a call
+// Forward an (encrypted) binary audio frame from one peer to the other.
 function handleAudio(ws, data) {
   const callId = ws.currentCall;
   if (!callId) return;
@@ -198,7 +256,7 @@ function handleAudio(ws, data) {
   sendBin(clients.get(peerId), data);
 }
 
-// @illusion: tear down call, remove from calls map, notify both peers
+// Tear down a call, remove it from the map, and notify both peers.
 function endCall(callId, byId, reason) {
   const call = calls.get(callId);
   if (!call) return;
@@ -213,7 +271,8 @@ function endCall(callId, byId, reason) {
   }
 }
 
-// @illusion: handle client disconnect, notify peer with reconnecting, set 30s grace timer
+// On disconnect, notify the peer and hold the call open for a 30s grace window
+// so the dropped side can reconnect and resume.
 function handleClose(ws) {
   const id = ws.id;
   if (!id) return;
@@ -227,7 +286,6 @@ function handleClose(ws) {
   const peer = clients.get(peerId);
   if (peer) {
     send(peer, { t: 'reconnecting', callId });
-    // Give the dropped peer a grace window to reconnect before tearing down.
     call.dropTimer = setTimeout(() => {
       calls.delete(callId);
       if (peer) { peer.currentCall = null; send(peer, { t: 'ended', callId }); }
@@ -249,7 +307,6 @@ wss.on('close', () => clearInterval(heartbeat));
 // ── Lifecycle (start/stop) ────────────────────────────────────────────────────
 // `listen` is split out so tests can start the relay on an ephemeral port and
 // tear it down, without the module binding a fixed port on import.
-// @illusion: start HTTP/WS server on the given port, resolve with actual port
 export function startServer(port = PORT) {
   return new Promise((resolve) => {
     httpServer.listen(port, () => {
@@ -260,7 +317,6 @@ export function startServer(port = PORT) {
   });
 }
 
-// @illusion: stop heartbeat and close WS/HTTP server gracefully
 export function stopServer() {
   clearInterval(heartbeat);
   return new Promise((resolve) => {
@@ -269,7 +325,7 @@ export function stopServer() {
   });
 }
 
-export { httpServer, wss, clients, calls, handleMessage, handleAudio, endCall, handleClose };
+export { httpServer, wss, clients, calls, handleMessage, handleAudio, endCall, handleClose, fingerprint, verifySig };
 
 // Only auto-start when executed directly (`node server.js`), not on import.
 const isRunDirectly =

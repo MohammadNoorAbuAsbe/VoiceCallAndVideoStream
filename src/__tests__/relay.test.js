@@ -26,7 +26,7 @@ class MockWebSocket {
     else this.sent.push({ _binary: true, data });
   }
   triggerOpen() { this.readyState = MockWebSocket.OPEN; this.onopen && this.onopen(); }
-  triggerMessage(data) { this.onmessage && this.onmessage({ data }); }
+  triggerMessage(data) { return this.onmessage && this.onmessage({ data }); }
   triggerClose() { this.readyState = MockWebSocket.CLOSED; this.onclose && this.onclose(); }
   close() { this.readyState = MockWebSocket.CLOSED; }
 }
@@ -63,12 +63,34 @@ describe('event subscription', () => {
 describe('connect', () => {
   it('opens a socket and sends a register message', () => {
     const rc = new RelayClient('wss://r');
-    rc.connect('me', 'tok');
+    rc.connect('me', 'tok', { pubKeyB64: 'PUB', sign: async (b) => b });
     const ws = firstWs();
     expect(ws.url).toBe('wss://r');
     ws.triggerOpen();
     expect(rc.connected).toBe(true);
-    expect(lastSent(ws)).toEqual({ t: 'register', id: 'me', token: 'tok' });
+    expect(lastSent(ws)).toEqual({ t: 'register', id: 'me', pubKey: 'PUB', token: 'tok' });
+  });
+
+  it('answers the server registration challenge with a signed auth', async () => {
+    const rc = new RelayClient('wss://r');
+    const sign = vi.fn(async (b) => btoa(String.fromCharCode(...new Uint8Array(b).map((x) => x + 1))));
+    rc.connect('me', null, { pubKeyB64: 'PUB', sign });
+    const ws = rc.ws;
+    ws.triggerOpen();
+    // server issues a challenge
+    await ws.triggerMessage(JSON.stringify({ t: 'challenge', nonce: 'bm9uY2U' }));
+    expect(sign).toHaveBeenCalled();
+    expect(lastSent(ws)).toEqual({ t: 'auth', sig: 'b3BvZGY=' });
+  });
+
+  it('stays registered=false until the auth is accepted', async () => {
+    const rc = new RelayClient('wss://r');
+    rc.connect('me', null, { pubKeyB64: 'PUB', sign: async (b) => btoa(String.fromCharCode(...new Uint8Array(b))) });
+    const ws = rc.ws;
+    ws.triggerOpen();
+    await ws.triggerMessage(JSON.stringify({ t: 'challenge', nonce: 'bm9uY2U' }));
+    // only an auth has been sent, not a 'registered' event
+    expect(lastSent(ws).t).toBe('auth');
   });
 
   it('schedules a reconnect after an unexpected close', () => {
@@ -228,10 +250,10 @@ describe('command methods', () => {
     return { rc, ws };
   }
 
-  it('call sends to/from/callId', () => {
+  it('call sends to/callId/offer', () => {
     const { ws, rc } = connected();
-    rc.call('bob', 'me', 'c1');
-    expect(lastSent(ws)).toEqual({ t: 'call', to: 'bob', name: 'me', callId: 'c1' });
+    rc.call('bob', 'c1', { idPub: 'P', ephPub: 'E', sig: 'S' });
+    expect(lastSent(ws)).toEqual({ t: 'call', to: 'bob', callId: 'c1', offer: { idPub: 'P', ephPub: 'E', sig: 'S' } });
   });
   it('accept', () => {
     const { ws, rc } = connected();

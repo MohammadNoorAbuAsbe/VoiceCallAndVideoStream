@@ -31,7 +31,7 @@ export class FakeRelayClient {
   }
 
   // ── commands (recorded) ──
-  call(to, name, callId)    { this.calls.push(['call', { to, name, callId }]); }
+  call(to, callId, offer)    { this.calls.push(['call', { to, callId, offer }]); }
   accept(callId, to)        { this.calls.push(['accept', { callId, to }]); }
   reject(callId, to)        { this.calls.push(['reject', { callId, to }]); }
   cancel(callId, to)        { this.calls.push(['cancel', { callId, to }]); }

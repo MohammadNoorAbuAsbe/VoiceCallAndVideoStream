@@ -9,6 +9,8 @@
 
 // ─── Storage keys ────────────────────────────────────────────────────────────
 const KEY_ID            = 'vcall_peer_id';
+const KEY_PUB           = 'vcall_pub_key';
+const KEY_PRIV          = 'vcall_priv_key';
 const KEY_MIC_DEVICE    = 'vcall_mic_device';
 const KEY_OUTPUT_DEVICE = 'vcall_out_device';
 const KEY_MUTE_KEYBIND  = 'vcall_mute_key';
@@ -21,13 +23,15 @@ let DEFAULT_RELAY_URL = 'wss://voicecallandvideostream.onrender.com';
 // ─── State ───────────────────────────────────────────────────────────────────
 import { RelayClient } from './relay.js';
 import * as audio from './audio.js';
+import { loadIdentity, generateIdentity, CallSession } from './crypto.js';
 import {
-  escHtml, relativeTime, formatKeybind, generateId, generateCallId,
+  escHtml, relativeTime, formatKeybind, generateCallId,
   loadContacts, saveContacts, addOrUpdateContact, removeContact, touchLastCall, getContactName,
 } from './util.js';
 
 let relay        = null;
 let myId         = null;
+let identity     = null;   // { id, publicKeyB64, privateKeyB64, sign } — see crypto.js
 let myName       = 'Me';
 
 let activeCall        = null; // { callId, peerId, peerName, direction }
@@ -79,7 +83,7 @@ function startRingtone() {
     });
     ringtoneTimer = setTimeout(() => {
       /* v8 ignore next */
-      // @illusion: <TODO: describe (try_statement)>
+      // @illusion: close the previous ringtone AudioContext before scheduling the next iteration
       if (ringtoneCtx) { try { ringtoneCtx.close(); } catch (_) {} ringtoneCtx = null; }
       ringOnce();
     }, 2200);
@@ -92,7 +96,7 @@ function stopRingtone() {
   ringtoneActive = false;
   clearTimeout(ringtoneTimer); ringtoneTimer = null;
   /* v8 ignore next */
-  // @illusion: <TODO: describe (try_statement)>
+  // @illusion: close the ringtone AudioContext, ignoring errors if already stopped
   if (ringtoneCtx) { try { ringtoneCtx.close(); } catch (_) {} ringtoneCtx = null; }
   document.title = _originalTitle;
 }
@@ -168,11 +172,43 @@ function getMicDeviceId()    { return localStorage.getItem(KEY_MIC_DEVICE)    ||
 // @illusion: read stored output device ID
 function getOutputDeviceId() { return localStorage.getItem(KEY_OUTPUT_DEVICE) || ''; }
 
-// @illusion: load peer ID from storage or generate and persist new one
+// Read the currently-known peer ID from storage (empty until an identity is
+// created). The real ID is the fingerprint of the identity public key.
 function loadOrCreateId() {
-  let id = localStorage.getItem(KEY_ID);
-  if (!id) { id = generateId(); localStorage.setItem(KEY_ID, id); }
-  return id;
+  return localStorage.getItem(KEY_ID) || '';
+}
+
+// Persist the current cryptographic identity (public key, private key, and the
+// derived ID) to localStorage.
+function persistIdentity() {
+  localStorage.setItem(KEY_PUB,  identity.publicKeyB64);
+  localStorage.setItem(KEY_PRIV, identity.privateKeyB64);
+  localStorage.setItem(KEY_ID,   identity.id);
+}
+
+// Load the stored Ed25519 identity, or generate and persist a new one. The peer
+// ID is derived from the public key, so it is unforgeable — no one can register
+// as us without our private key.
+async function ensureIdentity() {
+  if (identity) return identity;
+  const pub  = localStorage.getItem(KEY_PUB);
+  const priv = localStorage.getItem(KEY_PRIV);
+  if (pub && priv) {
+    try { identity = await loadIdentity(pub, priv); }
+    catch { identity = await generateIdentity(); persistIdentity(); }
+  } else {
+    identity = await generateIdentity();
+    persistIdentity();
+  }
+  if (!myId) myId = identity.id;
+  return identity;
+}
+
+// Build the auth bundle the relay uses to answer the server's registration
+// challenge (proves possession of the identity private key).
+function relayAuth() {
+  if (!identity) return null;
+  return { pubKeyB64: identity.publicKeyB64, sign: (bytes) => identity.sign(bytes) };
 }
 
 // @illusion: create RelayClient, wire all event handlers, connect to relay
@@ -192,19 +228,25 @@ function initRelay() {
       if (activeCall) { reconnecting = true; showReconnectUI('Reconnecting…'); relay.reconnect(activeCall.callId, activeCall.peerId); }
     })
     .on('id-taken',  () => {
-      myId = generateId();
-      localStorage.setItem(KEY_ID, myId);
-      document.getElementById('my-peer-id').textContent = myId;
-      relay.connect(myId, getRelayToken());
+      // With key-derived IDs a collision means this identity is already online
+      // in another session — rotating the ID would abandon our contacts, so we
+      // surface it instead.
+      setRelayStatus(false, 'ID already online elsewhere');
     })
     .on('close',     () => {
       setRelayStatus(false, 'Reconnecting…');
       if (activeCall) { reconnecting = true; showReconnectUI('Reconnecting…'); }
     })
     .on('audio',     (bytes) => {
-      audio.playBytes(bytes.buffer);
       lastAudioAt = Date.now();
       if (reconnecting) { reconnecting = false; clearReconnectUI(); }
+      const session = activeCall && activeCall.session;
+      if (!session || !session.ready) return; // can't decrypt without a session
+      const chain = (activeCall._recvChain || Promise.resolve())
+        .then(() => session.decrypt(bytes))
+        .then((pt) => audio.playBytes(pt.buffer !== undefined ? pt.buffer : pt))
+        .catch(() => {}); // drop undecryptable frames
+      activeCall._recvChain = chain;
     })
     .on('incoming',  (m) => handleIncoming(m))
     .on('accepted',  (m) => handleAccepted(m))
@@ -217,13 +259,14 @@ function initRelay() {
     .on('reconnected',  (m) => handleReconnected(m))
     .on('muted',     (m) => handleRemoteMuted(m));
 
-  relay.connect(myId, getRelayToken());
+  relay.connect(myId, getRelayToken(), relayAuth());
 }
 
 // ─── Incoming call ─────────────────────────────────────────────────────────────
-// @illusion: handle incoming call with glare resolution and auto-reject if busy
+// Handle an incoming call: resolve glare, auto-reject when busy, otherwise ring.
+// `offer` carries the peer's signed key-exchange material for E2E encryption.
 function handleIncoming(m) {
-  const { from, name, callId } = m;
+  const { from, name, callId, offer } = m;
 
   // Glare: we're also calling them. Higher id wins and keeps its outgoing call.
   if (pendingOutgoing && pendingOutgoing.to === from) {
@@ -231,33 +274,47 @@ function handleIncoming(m) {
     // We lose — cancel our outgoing and auto-answer theirs.
     relay.cancel(pendingOutgoing.callId, from);
     pendingOutgoing = null;
-    acceptIncomingInternal(callId, from, getContactName(from), true);
+    acceptIncomingInternal(callId, from, getContactName(from), true, offer);
     return;
   }
   if (activeCall || pendingIncoming) { relay.reject(callId, from); return; }
 
-  pendingIncoming = { callId, from, name };
+  pendingIncoming = { callId, from, name, offer };
   document.getElementById('incoming-caller-name').textContent = getContactName(from);
   showScreen('screen-incoming');
   startRingtone();
 }
 
-// @illusion: accept pending incoming call, stop ringtone
+// Accept the pending incoming call, stopping the ringtone first.
 async function acceptCall() {
   if (!pendingIncoming) return;
   stopRingtone();
-  await acceptIncomingInternal(pendingIncoming.callId, pendingIncoming.from, getContactName(pendingIncoming.from), false);
+  await acceptIncomingInternal(pendingIncoming.callId, pendingIncoming.from, getContactName(pendingIncoming.from), false, pendingIncoming.offer);
 }
-// @illusion: init mic, send accept to relay, transition to incall screen
-async function acceptIncomingInternal(callId, from, peerName, auto) {
-  // @illusion: <TODO: describe (try_statement)>
+// Init mic, perform the E2E key exchange, send `accept`, and open the call screen.
+async function acceptIncomingInternal(callId, from, peerName, auto, offer) {
+  await ensureIdentity();
   try { await audio.initCapture(getMicDeviceId(), noiseCancellationEnabled); }
   catch (e) {
     handleMicError(e); // we still connect so we can hear them; we just can't talk
     showToast('Mic unavailable — you can listen but not speak.', true);
   }
-  relay.accept(callId, from);
-  activeCall = { callId, peerId: from, peerName, direction: 'in' };
+  // Complete the authenticated key exchange from the caller's signed offer.
+  let session = null, answer = null;
+  if (offer) {
+    try {
+      const r = await CallSession.responder(identity, from, callId, offer);
+      session = r.session; answer = r.answer;
+    } catch (e) {
+      showToast('Secure handshake failed — call rejected.', true);
+      relay.reject(callId, from);
+      pendingIncoming = null;
+      showScreen('screen-idle');
+      return;
+    }
+  }
+  relay.accept(callId, from, answer);
+  activeCall = { callId, peerId: from, peerName, direction: 'in', session };
   pendingIncoming = null;
   callConnectedAt = Date.now();
   document.getElementById('incall-peer-name').textContent = peerName;
@@ -277,7 +334,7 @@ function rejectCall() {
 }
 
 // ─── Outgoing call ─────────────────────────────────────────────────────────────
-// @illusion: initiate outgoing call with mic init and no-answer timeout
+// Initiate an outgoing call: mic init, E2E key-exchange offer, no-answer timeout.
 async function startCall(peerId, peerName) {
   if (!getRelayUrl()) {
     showToast('Set the Relay Server URL in Settings first.', true);
@@ -287,19 +344,21 @@ async function startCall(peerId, peerName) {
   if (!relay || !relay.connected) { showToast('Connecting to relay…', true); return; }
   if (activeCall || pendingOutgoing || pendingIncoming) { showToast('You are already in a call.', true); return; }
 
-  // @illusion: <TODO: describe (try_statement)>
+  await ensureIdentity();
   try { await audio.initCapture(getMicDeviceId(), noiseCancellationEnabled); }
   catch (e) { handleMicError(e); return; }
 
   const callId = generateCallId();
-  pendingOutgoing = { callId, to: peerId, name: peerName };
+  // Build the signed key-exchange offer the callee will verify + complete.
+  const { session, offer } = await CallSession.initiator(identity, peerId, callId);
+  pendingOutgoing = { callId, to: peerId, name: peerName, session };
   document.getElementById('calling-peer-name').textContent = peerName;
   const avatar = document.getElementById('calling-avatar');
   if (avatar) avatar.textContent = peerName[0]?.toUpperCase() || '?';
   showScreen('screen-calling');
   ensureAudioPlaying(); // create/resume playback context during the click gesture
 
-  relay.call(peerId, myId, callId);
+  relay.call(peerId, callId, offer);
   noAnswerTimer = setTimeout(() => {
     if (pendingOutgoing && pendingOutgoing.callId === callId) {
       const t = pendingOutgoing.to;
@@ -324,11 +383,25 @@ function cancelCall() {
 }
 
 // ─── Call accepted by the other side ───────────────────────────────────────────
-// @illusion: transition to incall when remote accepts our outgoing call
-function handleAccepted(m) {
+// Remote accepted our call: complete the key exchange from their signed answer,
+// then transition to the in-call screen.
+async function handleAccepted(m) {
   if (!pendingOutgoing || pendingOutgoing.callId !== m.callId) return;
   clearTimeout(noAnswerTimer); noAnswerTimer = null;
-  activeCall = { callId: pendingOutgoing.callId, peerId: pendingOutgoing.to, peerName: pendingOutgoing.name, direction: 'out' };
+  const session = pendingOutgoing.session;
+  if (session && m.answer) {
+    try { await session.completeInitiator(m.answer); }
+    catch (e) {
+      const to = pendingOutgoing.to;
+      pendingOutgoing = null;
+      audio.closeCapture();
+      relay.hangup(m.callId, to);
+      showToast('Secure handshake failed — call ended.', true);
+      showScreen('screen-idle');
+      return;
+    }
+  }
+  activeCall = { callId: pendingOutgoing.callId, peerId: pendingOutgoing.to, peerName: pendingOutgoing.name, direction: 'out', session };
   pendingOutgoing = null;
   callConnectedAt = Date.now();
   document.getElementById('incall-peer-name').textContent = activeCall.peerName;
@@ -495,7 +568,7 @@ function resetInCallButtons() {
 
 // @illusion: init or resume playback context, show enable-sound button if suspended
 async function ensureAudioPlaying() {
-  // @illusion: <TODO: describe (try_statement)>
+  // @illusion: tolerate playback init/resume failures (autoplay policy or missing device)
   try {
     if (!audio.isPlaybackReady()) await audio.initPlayback();
     else await audio.resumePlayback();
@@ -552,7 +625,7 @@ function handleMicError(e) {
 // ─── Device settings ─────────────────────────────────────────────────────────────
 // @illusion: enumerate mic and output devices, populate settings dropdowns
 async function populateDeviceSelects() {
-  // @illusion: <TODO: describe (try_statement)>
+  // @illusion: requesting the mic may be denied; keep enumerating devices either way
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     stream.getTracks().forEach(t => t.stop());
@@ -584,7 +657,7 @@ async function applyOutputDevice() {
 // ─── Mute keybind ─────────────────────────────────────────────────────────────────
 // @illusion: read mute keybind from localStorage, return parsed object or null
 function getMuteKeybind() {
-  // @illusion: <TODO: describe (try_statement)>
+  // @illusion: tolerate corrupt stored keybind JSON
   try { return JSON.parse(localStorage.getItem(KEY_MUTE_KEYBIND) || 'null'); }
   catch { return null; }
 }
@@ -635,7 +708,7 @@ function startKeybindCapture() {
 // @illusion: copy peer ID to clipboard with button feedback
 async function copyMyId() {
   if (!myId) { showToast('ID not ready yet.', true); return; }
-  // @illusion: <TODO: describe (try_statement)>
+  // @illusion: tolerate clipboard write failures (permissions / insecure context)
   try {
     await navigator.clipboard.writeText(myId);
     const btn = document.getElementById('btn-copy-my-id');
@@ -665,10 +738,20 @@ function saveContact() {
 // talk-latency, so we do not batch frames into larger WebSocket messages.
 let _starveStart = 0;
 
-// @illusion: send captured audio frame to relay when in active call
+// Encrypt each captured frame end-to-end, then send it. Frames are chained so
+// ciphertext is emitted in capture order. No plaintext is ever sent: if the
+// secure session isn't ready yet the frame is dropped.
 audio.setOnFrame((frame48) => {
   if (!activeCall || !relay || !relay.connected) return;
-  relay.sendAudio(audio.capture48ToWire(frame48));
+  const session = activeCall.session;
+  if (!session || !session.ready) return;
+  const wire = audio.capture48ToWire(frame48);
+  const chain = (activeCall._sendChain || Promise.resolve())
+    .then(() => session.encrypt(wire))
+    .then((ct) => { if (activeCall && relay && relay.connected) relay.sendAudio(ct); })
+    .catch(() => {});
+  activeCall._sendChain = chain;
+  return chain;
 });
 // @illusion: update UI on playback starvation status — show warning after sustained drop
 audio.setOnStarved((starved) => {
@@ -707,13 +790,10 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ─── Init ─────────────────────────────────────────────────────────────────────────
-// @illusion: init app state, bind all UI event handlers, start relay connection
-document.addEventListener('DOMContentLoaded', () => {
-  myId = loadOrCreateId();
-  document.getElementById('my-peer-id').textContent = myId;
-  initRelay();
-  renderContacts();
-
+// Init app state, bind all UI event handlers, and start the relay connection.
+document.addEventListener('DOMContentLoaded', async () => {
+  // Wire up all UI controls first so the app is interactive immediately; the
+  // cryptographic identity derived below only affects the displayed peer ID.
   document.getElementById('btn-copy-my-id').addEventListener('click', copyMyId);
   document.getElementById('btn-add-contact').addEventListener('click', () => showScreen('screen-add-contact'));
   document.getElementById('btn-open-settings').addEventListener('click', () => {
@@ -736,7 +816,7 @@ document.addEventListener('DOMContentLoaded', () => {
     showToast('Relay saved. Reconnecting…');
     // Tear down and rebuild the relay connection with the new URL.
     /* v8 ignore next */
-    // @illusion: <TODO: describe (try_statement)>
+    // @illusion: close the previous relay socket before reconnecting (ignore if absent)
     if (relay) { relay.connected = false; try { relay.ws && relay.ws.close(); } catch {} }
     initRelay();
   });
@@ -769,6 +849,11 @@ document.addEventListener('DOMContentLoaded', () => {
   navigator.mediaDevices?.addEventListener?.('devicechange', () => {
     if (document.getElementById('screen-settings').classList.contains('active')) populateDeviceSelects();
   });
+
+  await ensureIdentity();
+  document.getElementById('my-peer-id').textContent = myId;
+  initRelay();
+  renderContacts();
 });
 
 // ─── Test hooks (non-breaking: nothing else in the module relies on these) ───
@@ -776,6 +861,7 @@ document.addEventListener('DOMContentLoaded', () => {
 export function __resetState() {
   relay = null;
   myId = null;
+  identity = null;
   myName = 'Me';
   activeCall = null;
   pendingOutgoing = null;
@@ -819,7 +905,7 @@ export {
   populateDeviceSelects, applyOutputDevice,
   getMuteKeybind, setMuteKeybind, updateKeybindDisplay, startKeybindCapture,
   copyMyId, saveContact,
-  KEY_ID, KEY_MIC_DEVICE, KEY_OUTPUT_DEVICE, KEY_MUTE_KEYBIND, KEY_RELAY_URL, KEY_RELAY_TOKEN,
+  KEY_ID, KEY_PUB, KEY_PRIV, KEY_MIC_DEVICE, KEY_OUTPUT_DEVICE, KEY_MUTE_KEYBIND, KEY_RELAY_URL, KEY_RELAY_TOKEN,
   DEFAULT_RELAY_URL,
 };
 
@@ -829,9 +915,9 @@ export function getStarveStart()     { return _starveStart; }
 export function getKeybindCapturing() { return _keybindCapturing; }
 
 // Test-only setters (no runtime behaviour change for the app).
-// @illusion: set peer ID for test isolation
 export function __setMyId(id)        { myId = id; }
-// @illusion: set default relay URL for test isolation
+export function __getMyId()          { return myId; }
 export function __setDefaultRelayUrl(url) { DEFAULT_RELAY_URL = url; }
-// @illusion: set intentional hangup flag for test isolation
 export function __setIntentionalHangup(v) { intentionalHangup = v; }
+export function __setActiveSession(s) { if (activeCall) activeCall.session = s; }
+export async function __ensureIdentity() { return ensureIdentity(); }

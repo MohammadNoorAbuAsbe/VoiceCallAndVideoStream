@@ -6,8 +6,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import {
-  handleMessage, handleAudio, handleClose, attachRelay, clients, calls,
+  handleMessage, handleAudio, handleClose, attachRelay, clients, calls, fingerprint,
 } from '../server.js';
+import { generateIdentity } from '../../src/crypto.js';
+
+// Drive the full register → challenge → auth handshake for a real identity,
+// returning the final response message ({ t: 'registered' | ... }).
+async function register(ws, ident) {
+  await handleMessage(ws, { t: 'register', id: ident.id, pubKey: ident.publicKeyB64 });
+  const ch = ws.emits('challenge');
+  const sig = await ident.sign(Buffer.from(ch.nonce, 'base64'));
+  await handleMessage(ws, { t: 'auth', id: ident.id, sig });
+  return ws.last;
+}
 
 class FakeWs extends EventEmitter {
   constructor() {
@@ -31,36 +42,37 @@ beforeEach(() => { clients.clear(); calls.clear(); });
 afterEach(() => { clients.clear(); calls.clear(); });
 
 describe('handleMessage: register', () => {
-  it('registers a valid id and records the socket', () => {
+  it('registers a valid id and records the socket', async () => {
     const ws = new FakeWs();
-    handleMessage(ws, { t: 'register', id: 'alice' });
-    expect(ws.last).toEqual({ t: 'registered', id: 'alice' });
-    expect(ws.id).toBe('alice');
-    expect(clients.get('alice')).toBe(ws);
+    const ident = await generateIdentity();
+    const res = await register(ws, ident);
+    expect(res).toEqual({ t: 'registered', id: ident.id });
+    expect(ws.id).toBe(ident.id);
+    expect(clients.get(ident.id)).toBe(ws);
   });
-  it('rejects an empty id with id-taken', () => {
+  it('rejects an id whose key is not its fingerprint', async () => {
     const ws = new FakeWs();
-    handleMessage(ws, { t: 'register', id: '' });
-    expect(ws.last).toEqual({ t: 'id-taken', id: '' });
+    const ident = await generateIdentity();
+    await handleMessage(ws, { t: 'register', id: 'not-the-fingerprint', pubKey: ident.publicKeyB64 });
+    expect(ws.last).toEqual({ t: 'register-denied', reason: 'id-mismatch' });
     expect(ws.id).toBeNull();
   });
-  it('rejects whitespace-only id with id-taken (trimmed)', () => {
-    const ws = new FakeWs();
-    handleMessage(ws, { t: 'register', id: '   ' });
-    expect(ws.last).toEqual({ t: 'id-taken', id: '' });
-    expect(ws.id).toBeNull();
+  it('rejects a second registration of an already-online id with id-taken', async () => {
+    const a = await generateIdentity();
+    const aw = new FakeWs();
+    await register(aw, a);
+    // Same identity (same key) connecting from a second socket — the id is still
+    // the fingerprint of the pubkey, so it's not an id-mismatch, but the id is
+    // already online.
+    const aw2 = new FakeWs();
+    await handleMessage(aw2, { t: 'register', id: a.id, pubKey: a.publicKeyB64 });
+    expect(aw2.last).toEqual({ t: 'id-taken', id: a.id });
   });
-  it('rejects a duplicate id with id-taken', () => {
-    const a = new FakeWs();
-    handleMessage(a, { t: 'register', id: 'dup' });
-    const b = new FakeWs();
-    handleMessage(b, { t: 'register', id: 'dup' });
-    expect(b.last).toEqual({ t: 'id-taken', id: 'dup' });
-  });
-  it('allows registration with a token when no token is required', () => {
+  it('allows registration with a token when no token is required', async () => {
     const ws = new FakeWs();
-    handleMessage(ws, { t: 'register', id: 'tok', token: 'whatever' });
-    expect(ws.last).toEqual({ t: 'registered', id: 'tok' });
+    const ident = await generateIdentity();
+    const res = await register(ws, ident);
+    expect(res).toEqual({ t: 'registered', id: ident.id });
   });
 });
 
@@ -94,9 +106,10 @@ describe('handleMessage: call', () => {
     const a = new FakeWs(); a.id = 'a';
     const b = new FakeWs(); b.id = 'b';
     clients.set('a', a); clients.set('b', b);
-    handleMessage(a, { t: 'call', to: 'b', name: 'a', callId: 'c1' });
+    const offer = { idPub: 'P', ephPub: 'E', sig: 'S' };
+    handleMessage(a, { t: 'call', to: 'b', callId: 'c1', offer });
     expect(a.pendingOutgoing).toEqual({ to: 'b', callId: 'c1' });
-    expect(b.emits('incoming')).toEqual({ t: 'incoming', from: 'a', name: 'a', callId: 'c1' });
+    expect(b.emits('incoming')).toEqual({ t: 'incoming', from: 'a', callId: 'c1', offer });
   });
 });
 
@@ -111,8 +124,9 @@ describe('handleMessage: accept', () => {
     const a = new FakeWs(); a.id = 'a'; a.pendingOutgoing = { to: 'b', callId: 'c1' };
     const b = new FakeWs(); b.id = 'b';
     clients.set('a', a); clients.set('b', b);
-    handleMessage(b, { t: 'accept', callId: 'c1', to: 'a' });
-    expect(a.emits('accepted')).toEqual({ t: 'accepted', callId: 'c1', from: 'b', name: 'b' });
+    const answer = { idPub: 'P', ephPub: 'E', sig: 'S' };
+    handleMessage(b, { t: 'accept', callId: 'c1', to: 'a', answer });
+    expect(a.emits('accepted')).toEqual({ t: 'accepted', callId: 'c1', from: 'b', answer });
     expect(a.currentCall).toBe('c1');
     expect(b.currentCall).toBe('c1');
     expect(a.pendingOutgoing).toBeNull();

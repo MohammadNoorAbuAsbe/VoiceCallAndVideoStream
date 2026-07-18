@@ -37,3 +37,9 @@ src-tauri/target/
 
 # OS
 Thumbs.db
+
+# Knowledge-graph / tooling output
+graphify-out/
+
+# Editor / agent tooling
+.cursor/

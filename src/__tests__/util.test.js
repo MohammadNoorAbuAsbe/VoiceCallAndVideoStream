@@ -2,7 +2,7 @@
 // Tests for the pure UI helpers extracted into src/util.js.
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
-  escHtml, relativeTime, formatKeybind, generateId, generateCallId,
+  escHtml, relativeTime, formatKeybind, generateCallId,
   KEY_CONTACTS, loadContacts, saveContacts, addOrUpdateContact,
   removeContact, touchLastCall, getContactName,
 } from '../util.js';
@@ -91,12 +91,9 @@ describe('formatKeybind', () => {
   });
 });
 
-describe('id generation', () => {
-  it('generates non-empty, unique ids and callIds', () => {
-    expect(generateId()).toMatch(/\S+/);
+describe('callId generation', () => {
+  it('generates a non-empty callId', () => {
     expect(generateCallId()).toMatch(/\S+/);
-    const set = new Set(Array.from({ length: 200 }, () => generateId()));
-    expect(set.size).toBe(200);
   });
   it('produces 1000 unique callIds', () => {
     const set = new Set(Array.from({ length: 1000 }, () => generateCallId()));

@@ -28,13 +28,14 @@ const hoist = vi.hoisted(() => {
     emit(type, detail) {
       (this.listeners.get(type) || []).forEach((cb) => cb(detail));
     }
-    connect(id, token) {
+    connect(id, token, auth) {
       this.id = id;
       this.token = token || null;
+      this.auth = auth || null;
       this.connected = true;
     }
-    call(to, name, callId)      { this.calls.push(['call', { to, name, callId }]); }
-    accept(callId, to)          { this.calls.push(['accept', { callId, to }]); }
+    call(to, callId, offer)     { this.calls.push(['call', { to, callId, offer }]); }
+    accept(callId, to, answer)  { this.calls.push(['accept', { callId, to, answer }]); }
     reject(callId, to)          { this.calls.push(['reject', { callId, to }]); }
     cancel(callId, to)          { this.calls.push(['cancel', { callId, to }]); }
     hangup(callId, to)          { this.calls.push(['hangup', { callId, to }]); }
@@ -79,10 +80,28 @@ const frameCb = audio.setOnFrame.mock.calls[0][0];
 const starvedCb = audio.setOnStarved.mock.calls[0][0];
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+// Poll until a condition holds — used because the call/audio paths now perform
+// asynchronous crypto (identity load + key exchange + AES-GCM).
+async function until(cond, ms = 2000) {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > ms) throw new Error('until() timed out');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+// A pass-through E2E session for exercising the encrypted audio path without a
+// real key exchange: encrypt/decrypt are identity transforms.
+function passthroughSession() {
+  return {
+    ready: true,
+    encrypt: (x) => Promise.resolve(x),
+    decrypt: (x) => Promise.resolve(x),
+  };
+}
 
 function setupRelay() {
-  const id = main.loadOrCreateId();
-  main.__setMyId(id);
+  main.__setMyId('me-test-id');
   main.initRelay();
   return hoist.getLastRelay();
 }
@@ -167,7 +186,7 @@ describe('relay status + connection', () => {
     main.__setDefaultRelayUrl('');
     setupRelay();
     expect(document.getElementById('relay-status').textContent).toBe('Relay URL not set');
-    expect(document.getElementById('my-peer-id').textContent).toBe(localStorage.getItem(main.KEY_ID));
+    expect(document.getElementById('my-peer-id').textContent).toBe('me-test-id');
     expect(hoist.getLastRelay()).toBe(before); // no RelayClient was constructed
     main.__setDefaultRelayUrl('wss://voicecallandvideostream.onrender.com');
   });
@@ -201,19 +220,21 @@ describe('relay status + connection', () => {
   it('relay "audio" plays bytes and clears reconnecting flag', async () => {
     const relay = setupRelay();
     await main.acceptIncomingInternal('c1', 'peer', 'Peer', false);
+    main.__setActiveSession(passthroughSession());
     relay.emit('close');
     relay.emit('audio', { buffer: new ArrayBuffer(4) });
+    await until(() => audio.playBytes.mock.calls.length >= 1);
     expect(audio.playBytes).toHaveBeenCalledWith(new ArrayBuffer(4));
     expect(document.getElementById('reconnect-overlay').classList.contains('hidden')).toBe(true);
   });
 
-  it('relay "id-taken" regenerates id and reconnects', () => {
+  it('relay "id-taken" surfaces the collision instead of rotating the id', () => {
     const relay = setupRelay();
-    const oldId = localStorage.getItem(main.KEY_ID);
+    const id = main.__getMyId();
     relay.emit('id-taken');
-    expect(localStorage.getItem(main.KEY_ID)).not.toBe(oldId);
+    expect(main.__getMyId()).toBe(id);
+    expect(document.getElementById('reconnect-overlay').classList.contains('hidden')).toBe(true);
     expect(relay.connected).toBe(true);
-    expect(document.getElementById('my-peer-id').textContent).toBe(localStorage.getItem(main.KEY_ID));
   });
 
   it('getRelayUrl / getRelayToken read storage with defaults', () => {
@@ -234,11 +255,14 @@ describe('relay status + connection', () => {
     expect(main.getOutputDeviceId()).toBe('spk1');
   });
 
-  it('loadOrCreateId creates and persists an id', () => {
-    const id = main.loadOrCreateId();
-    expect(id).toBeTruthy();
-    expect(localStorage.getItem(main.KEY_ID)).toBe(id);
-    expect(main.loadOrCreateId()).toBe(id);
+  it('ensureIdentity creates and persists a key-derived id', async () => {
+    localStorage.clear();
+    const ident1 = await main.__ensureIdentity();
+    expect(ident1.id).toBeTruthy();
+    expect(localStorage.getItem(main.KEY_ID)).toBe(ident1.id);
+    expect(localStorage.getItem(main.KEY_PUB)).toBeTruthy();
+    const ident2 = await main.__ensureIdentity();
+    expect(ident2.id).toBe(ident1.id); // stable across loads
   });
 });
 
@@ -266,7 +290,7 @@ describe('UI helpers', () => {
     expect(document.getElementById('contacts-list').innerHTML).toContain('No contacts yet');
   });
 
-  it('renderContacts renders contact rows with call/del handlers', () => {
+  it('renderContacts renders contact rows with call/del handlers', async () => {
     localStorage.setItem(
       'vcall_contacts',
       JSON.stringify([{ id: 'abc', name: 'Bob', lastCall: Date.now() }])
@@ -278,12 +302,11 @@ describe('UI helpers', () => {
     const relay = setupRelay();
     const callBtn = list.querySelector('.btn-call');
     callBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    return tick().then(() => {
-      expect(relay.callCount('call')).toBe(1);
-      const delBtn = list.querySelector('.btn-del');
-      delBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-      expect(JSON.parse(localStorage.getItem('vcall_contacts') || '[]').length).toBe(0);
-    });
+    await until(() => relay.callCount('call') >= 1);
+    expect(relay.callCount('call')).toBe(1);
+    const delBtn = list.querySelector('.btn-del');
+    delBtn.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    expect(JSON.parse(localStorage.getItem('vcall_contacts') || '[]').length).toBe(0);
   });
 });
 
@@ -318,9 +341,10 @@ describe('incoming call', () => {
     main.__setMyId('aaa');
     await main.startCall('peer', 'Peer');
     main.handleIncoming({ from: 'peer', name: 'Peer', callId: 'cIn' });
-    await tick();
+    await until(() => relay.callCount('accept') >= 1);
     expect(relay.callCount('cancel')).toBe(1);
-    expect(relay.lastCall('accept')).toEqual({ callId: 'cIn', to: 'peer' });
+    expect(relay.lastCall('accept').callId).toBe('cIn');
+    expect(relay.lastCall('accept').to).toBe('peer');
   });
 
   it('acceptCall no-ops without pending incoming', async () => {
@@ -333,7 +357,9 @@ describe('incoming call', () => {
     const relay = setupRelay();
     main.handleIncoming({ from: 'peer', name: 'Peer', callId: 'c1' });
     await main.acceptCall();
-    expect(relay.lastCall('accept')).toEqual({ callId: 'c1', to: 'peer' });
+    await until(() => relay.callCount('accept') >= 1);
+    expect(relay.lastCall('accept').callId).toBe('c1');
+    expect(relay.lastCall('accept').to).toBe('peer');
     expect(document.getElementById('screen-incall').classList.contains('active')).toBe(true);
   });
 
@@ -341,7 +367,7 @@ describe('incoming call', () => {
     const relay = setupRelay();
     audio.initCapture.mockRejectedValueOnce(new Error('no mic'));
     await main.acceptIncomingInternal('c1', 'peer', 'Peer', false);
-    expect(relay.lastCall('accept')).toEqual({ callId: 'c1', to: 'peer' });
+    expect(relay.lastCall('accept')).toEqual({ callId: 'c1', to: 'peer', answer: null });
     expect(document.getElementById('screen-incall').classList.contains('active')).toBe(true);
   });
 
@@ -404,11 +430,11 @@ describe('outgoing call', () => {
     await main.startCall('peer', 'Peer');
     const c = relay.lastCall('call');
     expect(c.to).toBe('peer');
-    expect(typeof c.name).toBe('string');
+    expect(c.offer).toBeTruthy();
     expect(c.callId).toBeTruthy();
     expect(document.getElementById('screen-calling').classList.contains('active')).toBe(true);
-    vi.advanceTimersByTime(40000);
-    expect(relay.callCount('cancel')).toBe(1);
+    vi.advanceTimersByTime(41000);
+    expect(relay.lastCall('cancel')).toBeTruthy();
     expect(document.getElementById('screen-idle').classList.contains('active')).toBe(true);
     vi.useRealTimers();
   });
@@ -930,7 +956,6 @@ describe('copy id / save contact', () => {
 
   it('saveContact adds contact and returns to idle', () => {
     setupRelay();
-    main.loadOrCreateId();
     setInput('contact-name-input', 'Bob');
     setInput('contact-id-input', 'friend-id');
     main.saveContact();
@@ -945,8 +970,9 @@ describe('audio frame wiring (onFrame / onStarved)', () => {
   it('onFrame sends audio only when in active connected call', async () => {
     const relay = setupRelay();
     await main.acceptIncomingInternal('c1', 'peer', 'Peer', false);
+    main.__setActiveSession(passthroughSession());
     const frame = new Float32Array(8);
-    frameCb(frame);
+    await frameCb(frame);
     expect(relay.lastCall('audio')).toBe(frame);
   });
 
@@ -1171,6 +1197,7 @@ describe('app bootstrap (DOMContentLoaded)', () => {
     });
 
     document.dispatchEvent(new window.Event('DOMContentLoaded'));
+    await until(() => document.getElementById('my-peer-id').textContent);
     expect(document.getElementById('my-peer-id').textContent).toBeTruthy();
 
     // open settings (also calls populateDeviceSelects)
