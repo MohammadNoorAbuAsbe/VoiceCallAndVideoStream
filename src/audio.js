@@ -1,21 +1,23 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  Audio pipeline (capture → 48 kHz PCM → relay, and relay → playback)
+//  Audio pipeline (capture → Opus → relay, and relay → Opus → playback)
 //
 //  Capture : mic → AudioContext@48k → capture-worklet (raw 512-sample frames)
 //            → main thread: FastEnhancer DTLN neural denoiser (optional) +
-//            noise gate → Int16 → relay (sent verbatim, no resampling).
+//            noise gate → buffer 960 Float32 samples → Opus encode → relay.
 //            The denoiser runs on the MAIN THREAD because it is an ES module
 //            (AudioWorkletProcessors cannot import ES modules). 512 samples =
 //            10.67 ms @ 48 kHz, the DTLN native frame. Browser echoCancellation
 //            + autoGainControl stay on; noise suppression is the DTLN's job.
-//  Playback: relay Int16 → Float32 → player-worklet ring buffer (with adaptive
-//            jitter buffering) → destination.
+//  Playback: relay Opus → AudioDecoder → Float32 → player-worklet ring buffer
+//            (with adaptive jitter buffering) → destination.
+//
+//  Opus compression at 20 kbps reduces bandwidth ~20x vs raw Int16 PCM.
 //
 //  No ICE/TURN: audio simply rides the WebSocket as small binary frames.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { loadModel } from './assets/fastenhancer/api/index.js';
-import { frameToBytes, int16ToFloat32, createNoiseGate } from './audio-codec.js';
+import { createOpusEncoder, createOpusDecoder, createNoiseGate } from './audio-codec.js';
 
 const MODEL_SIZE = 'base';   // 'tiny' | 'base' | 'small' — bump to 'small' for max NS
 
@@ -30,17 +32,28 @@ let denoiser     = null;     // FastEnhancer DTLN instance (main-thread fallback
 let denoiserWorker = null;   // Web Worker running the DTLN off the main thread
 let workerReady  = false;    // worker has loaded the model and is accepting frames
 let useWorker    = false;    // we successfully created a denoiser worker
-let onFrame      = null;     // (Float32Array@48k) => void
+let onFrame      = null;     // (Uint8Array) => void — Opus-compressed frame callback
 let onStarved    = null;     // (boolean) => void
+
+// Opus encoder state (capture path)
+let opusEncoder      = null;
+let opusCaptureBuf   = new Float32Array(960);  // 960 samples @ 48kHz = 20ms Opus frame
+let opusCaptureCount = 0;
+
+// Opus decoder (playback path)
+let opusDecoder      = null;
 
 // Noise gate (stateful) used after the denoiser in the capture path. Only runs
 // when the denoiser actually processed the frame (mirrors the original behavior
 // where raw audio with no denoiser was left untouched).
 const noiseGate  = createNoiseGate();
 
-// @illusion: acquire mic, create capture AudioContext+worklet, load neural denoiser
+// @illusion: acquire mic, create capture AudioContext+worklet, load neural denoiser + Opus encoder
 export async function initCapture(micDeviceId, noiseCancelEnabled) {
   noiseCancel = noiseCancelEnabled;
+  opusCaptureCount = 0;
+  opusCaptureBuf = new Float32Array(960);
+  if (!opusEncoder) opusEncoder = createOpusEncoder(48000, 20000);
 
   captureStream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -130,11 +143,33 @@ function handleCaptureFrame(frame) {
   deliverProcessed(frame, processed);
 }
 
-// Apply the noise gate (only after the denoiser actually ran) and emit.
-// @illusion: run noise gate (if denoised) then forward processed frame
-function deliverProcessed(frame, processed) {
+// Buffer Float32 frames to 960 samples (20ms @ 48kHz), then Opus-encode and
+// emit the compressed bytes via onFrame. Partial buffers are flushed on close.
+// @illusion: buffer 960 samples → Opus encode → emit compressed bytes via onFrame
+async function deliverProcessed(frame, processed) {
   if (processed && noiseCancel) frame = noiseGate.process(frame);
-  if (onFrame) onFrame(frame);
+
+  // Accumulate into the 960-sample Opus frame buffer.
+  const remaining = 960 - opusCaptureCount;
+  const n = Math.min(frame.length, remaining);
+  opusCaptureBuf.set(frame.subarray(0, n), opusCaptureCount);
+  opusCaptureCount += n;
+
+  if (opusCaptureCount >= 960) {
+    const fullBuf = opusCaptureBuf;
+    opusCaptureBuf = new Float32Array(960);
+    opusCaptureCount = 0;
+    // Carry over any samples that exceeded the 960 boundary.
+    if (n < frame.length) {
+      const extra = frame.subarray(n);
+      opusCaptureBuf.set(extra, 0);
+      opusCaptureCount = extra.length;
+    }
+    if (onFrame && opusEncoder) {
+      const opusBytes = await opusEncoder.encode(fullBuf);
+      if (onFrame) onFrame(opusBytes);
+    }
+  }
 }
 
 // @illusion: set callback for processed capture frames
@@ -150,11 +185,6 @@ export function setMuted(value) {
 // @illusion: enable or disable noise cancellation flag
 export function setNoiseCancel(value) {
   noiseCancel = value;
-}
-
-// @illusion: convert Float32 frame to Int16 wire bytes for relay transport
-export function capture48ToWire(frame48) {
-  return frameToBytes(frame48);
 }
 
 // ─── Playback ────────────────────────────────────────────────────────────────
@@ -191,10 +221,11 @@ export function isPlaybackReady()   { return !!playerNode; }
 // @illusion: check if playback context is in suspended state
 export function isPlaybackSuspended(){ return !!playCtx && playCtx.state === 'suspended'; }
 
-// @illusion: feed received Int16 audio buffer to player worklet for playback
-export function playBytes(arrayBuffer) {
+// @illusion: decode one Opus packet and feed Float32 to player worklet for playback
+export async function playOpusFrame(opusBytes) {
   if (!playerNode) return;
-  const f = int16ToFloat32(arrayBuffer);
+  if (!opusDecoder) opusDecoder = createOpusDecoder(48000);
+  const f = await opusDecoder.decode(opusBytes);
   playerNode.port.postMessage(f);
 }
 
@@ -207,8 +238,19 @@ export async function setOutputDevice(deviceId) {
   }
 }
 
-// @illusion: tear down capture graph, stop mic tracks, destroy denoiser
+// @illusion: tear down capture graph, stop mic tracks, destroy denoiser + Opus encoder
 export function closeCapture() {
+  // Flush any remaining buffered samples (pad to 960 with silence).
+  if (opusCaptureCount > 0 && opusEncoder && onFrame) {
+    const padded = new Float32Array(960);
+    padded.set(opusCaptureBuf.subarray(0, opusCaptureCount), 0);
+    opusEncoder.encode(padded).then((opusBytes) => {
+      if (onFrame) onFrame(opusBytes);
+    }).catch(() => {});
+  }
+  opusCaptureCount = 0;
+  opusCaptureBuf = new Float32Array(960);
+  if (opusEncoder) { opusEncoder.close(); opusEncoder = null; }
   if (denoiserWorker) {
     try { denoiserWorker.postMessage({ type: 'destroy' }); denoiserWorker.terminate(); } catch (_) { /* no-op */ }
     denoiserWorker = null;
@@ -221,8 +263,9 @@ export function closeCapture() {
   captureNode = null;
 }
 
-// @illusion: close playback context and release player node
+// @illusion: close playback context, release player node + Opus decoder
 export function closePlayback() {
+  if (opusDecoder) { opusDecoder.close(); opusDecoder = null; }
   if (playCtx) { playCtx.close().catch(() => {}); playCtx = null; }
   playerNode = null;
 }

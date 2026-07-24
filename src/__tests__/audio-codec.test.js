@@ -1,79 +1,163 @@
-// Pure codec + noise-gate tests (no browser APIs needed).
-import { describe, it, expect } from 'vitest';
-import { float32ToInt16, frameToBytes, int16ToFloat32, createNoiseGate } from '../audio-codec.js';
+// Opus codec + noise-gate tests.
+// WebCodecs APIs (AudioEncoder, AudioDecoder, AudioData, EncodedAudioChunk) are
+// mocked since they don't exist in jsdom; the mock encoder/decoder do a lossless
+// Float32↔Uint8Array round-trip so we can verify the factory wiring, promise
+// queue ordering, and close() behaviour.
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { createOpusEncoder, createOpusDecoder, createNoiseGate } from '../audio-codec.js';
 
-describe('float32ToInt16', () => {
-  it('returns a little-endian Int16 ArrayBuffer of length*2', () => {
-    const f = new Float32Array([0, 0.5, -0.25]);
-    const buf = float32ToInt16(f);
-    expect(buf).toBeInstanceOf(ArrayBuffer);
-    expect(buf.byteLength).toBe(6);
-    const dv = new DataView(buf);
-    expect(dv.getInt16(0, true)).toBe(0);
-    expect(dv.getInt16(2, true)).toBe(Math.trunc(0.5 * 0x7fff));
-    expect(dv.getInt16(4, true)).toBe(Math.trunc(-0.25 * 0x8000));
+// ─── WebCodecs mocks ──────────────────────────────────────────────────────────
+// FakeAudioEncoder: on encode(), passes the AudioData's raw buffer through the
+// output callback as a Uint8Array chunk (lossless round-trip). The output fires
+// asynchronously (next microtask) to match real WebCodecs behaviour, which is
+// critical because createOpusEncoder pushes to outputQueue *after* calling encode().
+class FakeAudioEncoder {
+  constructor({ output }) { this._output = output; }
+  configure() {}
+  encode(data) {
+    const bytes = new Uint8Array(data._opts.data);
+    const output = this._output;
+    queueMicrotask(() => {
+      const FakeChunk = globalThis.__FakeEncodedAudioChunk;
+      output(new FakeChunk({ data: bytes }));
+    });
+  }
+  close() {}
+}
+
+class FakeAudioDecoder {
+  constructor({ output }) { this._output = output; }
+  configure() {}
+  decode(chunk) {
+    const float32 = new Float32Array(chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength));
+    const output = this._output;
+    queueMicrotask(() => {
+      const FakeData = globalThis.__FakeAudioData;
+      output(new FakeData({ numberOfFrames: float32.length, data: float32 }));
+    });
+  }
+  close() {}
+}
+
+class FakeAudioData {
+  constructor(opts) { this._opts = opts; }
+  copyTo(buf) { buf.set(new Float32Array(this._opts.data)); }
+  close() {}
+  get numberOfFrames() { return this._opts.numberOfFrames; }
+}
+
+class FakeEncodedAudioChunk {
+  constructor(opts) { this.data = new Uint8Array(opts.data); }
+  copyTo(buf) { buf.set(this.data); }
+  get byteLength() { return this.data.byteLength; }
+}
+
+beforeEach(() => {
+  globalThis.AudioEncoder = FakeAudioEncoder;
+  globalThis.AudioDecoder = FakeAudioDecoder;
+  globalThis.AudioData = FakeAudioData;
+  globalThis.EncodedAudioChunk = FakeEncodedAudioChunk;
+  globalThis.__FakeAudioData = FakeAudioData;
+  globalThis.__FakeEncodedAudioChunk = FakeEncodedAudioChunk;
+});
+
+// ─── createOpusEncoder tests ──────────────────────────────────────────────────
+describe('createOpusEncoder', () => {
+  it('returns an object with encode() and close() methods', () => {
+    const enc = createOpusEncoder();
+    expect(typeof enc.encode).toBe('function');
+    expect(typeof enc.close).toBe('function');
+    enc.close();
   });
 
-  it('clamps to the [-1, 1] range', () => {
-    const dv = new DataView(float32ToInt16(new Float32Array([2, -2])));
-    expect(dv.getInt16(0, true)).toBe(0x7fff);
-    expect(dv.getInt16(2, true)).toBe(-0x8000);
+  it('encode() returns a promise resolving to Uint8Array', async () => {
+    const enc = createOpusEncoder();
+    const samples = new Float32Array(960).fill(0.5);
+    const result = await enc.encode(samples);
+    expect(result).toBeInstanceOf(Uint8Array);
+    enc.close();
   });
 
-  it('handles an empty frame', () => {
-    const buf = float32ToInt16(new Float32Array(0));
-    expect(buf.byteLength).toBe(0);
+  it('encode() preserves sample data in pass-through (mock Opus)', async () => {
+    const enc = createOpusEncoder();
+    const samples = new Float32Array([0.1, 0.2, -0.3]);
+    const result = await enc.encode(samples);
+    const back = new Float32Array(result.buffer);
+    expect(back[0]).toBeCloseTo(0.1, 5);
+    expect(back[1]).toBeCloseTo(0.2, 5);
+    expect(back[2]).toBeCloseTo(-0.3, 5);
+    enc.close();
   });
 
-  it('clamps NaN to 0 and Infinity to the extremes', () => {
-    const dv = new DataView(float32ToInt16(new Float32Array([NaN, Infinity, -Infinity])));
-    expect(dv.getInt16(0, true)).toBe(0);          // NaN * 0x8000 -> NaN -> setInt16(NaN) -> 0
-    expect(dv.getInt16(2, true)).toBe(0x7fff);     // +Infinity -> +1
-    expect(dv.getInt16(4, true)).toBe(-0x8000);    // -Infinity -> -1
+  it('encode() resolves promises in order', async () => {
+    const enc = createOpusEncoder();
+    const p1 = enc.encode(new Float32Array([1]));
+    const p2 = enc.encode(new Float32Array([2]));
+    const r1 = await p1;
+    const r2 = await p2;
+    expect(new Float32Array(r1.buffer)[0]).toBe(1);
+    expect(new Float32Array(r2.buffer)[0]).toBe(2);
+    enc.close();
+  });
+
+  it('close() can be called multiple times without throwing', () => {
+    const enc = createOpusEncoder();
+    enc.close();
+    expect(() => enc.close()).not.toThrow();
   });
 });
 
-describe('frameToBytes', () => {
-  it('produces an Int16-le buffer for the wire', () => {
-    const buf = frameToBytes(new Float32Array([1, -1]));
-    const dv = new DataView(buf);
-    expect(dv.getInt16(0, true)).toBe(0x7fff);
-    expect(dv.getInt16(2, true)).toBe(-0x8000);
+// ─── createOpusDecoder tests ──────────────────────────────────────────────────
+describe('createOpusDecoder', () => {
+  it('returns an object with decode() and close() methods', () => {
+    const dec = createOpusDecoder();
+    expect(typeof dec.decode).toBe('function');
+    expect(typeof dec.close).toBe('function');
+    dec.close();
   });
 
-  it('handles an empty frame', () => {
-    const buf = frameToBytes(new Float32Array(0));
-    expect(buf.byteLength).toBe(0);
+  it('decode() returns a promise resolving to Float32Array', async () => {
+    const dec = createOpusDecoder();
+    const bytes = new Uint8Array(new Float32Array(960).fill(0.5).buffer);
+    const result = await dec.decode(bytes);
+    expect(result).toBeInstanceOf(Float32Array);
+    expect(result.length).toBe(960);
+    dec.close();
   });
 
-  it('is equivalent to float32ToInt16', () => {
-    const f = new Float32Array([0.1, -0.2, 0.3]);
-    const a = new Int16Array(frameToBytes(f));
-    const b = new Int16Array(float32ToInt16(f));
-    expect(Array.from(a)).toEqual(Array.from(b));
+  it('encoder→decoder round-trip preserves data', async () => {
+    const enc = createOpusEncoder();
+    const dec = createOpusDecoder();
+    const original = new Float32Array([0.1, -0.5, 0.99, 0]);
+    const encoded = await enc.encode(original);
+    const decoded = await dec.decode(encoded);
+    expect(decoded[0]).toBeCloseTo(0.1, 5);
+    expect(decoded[1]).toBeCloseTo(-0.5, 5);
+    expect(decoded[2]).toBeCloseTo(0.99, 5);
+    expect(decoded[3]).toBeCloseTo(0, 5);
+    enc.close();
+    dec.close();
+  });
+
+  it('decode() resolves promises in order', async () => {
+    const dec = createOpusDecoder();
+    const d1 = dec.decode(new Uint8Array(new Float32Array([1]).buffer));
+    const d2 = dec.decode(new Uint8Array(new Float32Array([2]).buffer));
+    const r1 = await d1;
+    const r2 = await d2;
+    expect(r1[0]).toBe(1);
+    expect(r2[0]).toBe(2);
+    dec.close();
+  });
+
+  it('close() can be called multiple times without throwing', () => {
+    const dec = createOpusDecoder();
+    dec.close();
+    expect(() => dec.close()).not.toThrow();
   });
 });
 
-describe('int16ToFloat32', () => {
-  it('converts back to approximately the original floats', () => {
-    const f = new Float32Array([0, 1, -1, 0.5]);
-    const back = int16ToFloat32(float32ToInt16(f));
-    expect(back[0]).toBeCloseTo(0, 5);
-    expect(back[1]).toBeCloseTo(1 - 1 / 32768, 5);
-    expect(back[2]).toBeCloseTo(-1, 5);
-    expect(back[3]).toBeCloseTo(0.5, 2);
-  });
-
-  it('handles an empty ArrayBuffer', () => {
-    expect(int16ToFloat32(new ArrayBuffer(0)).length).toBe(0);
-  });
-
-  it('round-trips a single sample', () => {
-    const back = int16ToFloat32(float32ToInt16(new Float32Array([0.25])));
-    expect(back[0]).toBeCloseTo(0.25, 4);
-  });
-});
-
+// ─── createNoiseGate tests ────────────────────────────────────────────────────
 describe('createNoiseGate', () => {
   it('outputs silence for silent input', () => {
     const g = createNoiseGate();
@@ -103,8 +187,8 @@ describe('createNoiseGate', () => {
   it('keeps the gate open for signal between thresholds (hysteresis)', () => {
     const g = createNoiseGate();
     const loud = new Float32Array([0.3, 0.3, 0.3]);
-    for (let i = 0; i < 30; i++) g.process(loud); // open it
-    const quiet = new Float32Array([0.01, 0.01, 0.01]); // above close, below open
+    for (let i = 0; i < 30; i++) g.process(loud);
+    const quiet = new Float32Array([0.01, 0.01, 0.01]);
     const out = g.process(quiet);
     expect(g.isOpen).toBe(true);
     expect(out[0]).toBeCloseTo(0.01, 5);
@@ -132,11 +216,9 @@ describe('createNoiseGate: boundaries, release, custom opts', () => {
   it('opens only when peak strictly exceeds the open threshold', () => {
     const g = createNoiseGate();
     const openLin = Math.pow(10, -36 / 20);
-    // Just below the open threshold does NOT open (boundary is strict >).
     const below = g.process(new Float32Array([openLin * 0.99, openLin * 0.99, openLin * 0.99]));
     expect(g.isOpen).toBe(false);
     expect(Array.from(below)).toEqual([0, 0, 0]);
-    // Just above the threshold opens (after a few frames the env reaches 1).
     const above = new Float32Array([openLin * 1.5, openLin * 1.5, openLin * 1.5]);
     let out;
     for (let i = 0; i < 30; i++) out = g.process(above);
@@ -148,11 +230,9 @@ describe('createNoiseGate: boundaries, release, custom opts', () => {
   it('closes only when peak strictly drops below the close threshold', () => {
     const g = createNoiseGate();
     const closeLin = Math.pow(10, -46 / 20);
-    // Just above the close threshold (but below open) does NOT close.
     const above = g.process(new Float32Array([closeLin * 1.5, closeLin * 1.5, closeLin * 1.5]));
     expect(g.isOpen).toBe(false);
     expect(Array.from(above)).toEqual([0, 0, 0]);
-    // Below the close threshold stays closed.
     const below = new Float32Array([closeLin * 0.5, closeLin * 0.5, closeLin * 0.5]);
     const out = g.process(below);
     expect(g.isOpen).toBe(false);
@@ -162,13 +242,13 @@ describe('createNoiseGate: boundaries, release, custom opts', () => {
   it('fades out gradually (release) once the signal drops', () => {
     const g = createNoiseGate({ openDb: -36, closeDb: -46, attack: 0.5, release: 0.5 });
     const loud = new Float32Array([0.3, 0.3, 0.3]);
-    for (let i = 0; i < 30; i++) g.process(loud); // fully open
+    for (let i = 0; i < 30; i++) g.process(loud);
     expect(g.env).toBe(1);
     const quiet = new Float32Array([0, 0, 0]);
     const out1 = g.process(quiet);
     expect(g.isOpen).toBe(false);
     expect(g.env).toBeCloseTo(0.5, 5);
-    expect(out1[0]).toBeCloseTo(0, 5); // env 0.5 * 0 = 0
+    expect(out1[0]).toBeCloseTo(0, 5);
     const out2 = g.process(quiet);
     expect(g.env).toBeCloseTo(0, 5);
     expect(Array.from(out2)).toEqual([0, 0, 0]);
@@ -184,11 +264,10 @@ describe('createNoiseGate: boundaries, release, custom opts', () => {
 
   it('honours custom open/close/attack/release options', () => {
     const g = createNoiseGate({ openDb: -20, closeDb: -30, attack: 0.1, release: 0.9 });
-    const mid = Math.pow(10, -25 / 20); // between -30 and -20 → stays closed from silent
+    const mid = Math.pow(10, -25 / 20);
     const out = g.process(new Float32Array([mid, mid, mid]));
     expect(g.isOpen).toBe(false);
     expect(Array.from(out)).toEqual([0, 0, 0]);
-    // Now a loud signal (above -20) should open.
     const loud = new Float32Array([0.5, 0.5, 0.5]);
     for (let i = 0; i < 30; i++) g.process(loud);
     expect(g.env).toBe(1);
@@ -203,8 +282,8 @@ describe('createNoiseGate: boundaries, release, custom opts', () => {
   it('keeps the gate open while signal sits between the thresholds', () => {
     const g = createNoiseGate();
     const loud = new Float32Array([0.3, 0.3, 0.3]);
-    for (let i = 0; i < 30; i++) g.process(loud); // open
-    const between = new Float32Array([Math.pow(10, -40 / 20), 0, 0]); // above close, below open
+    for (let i = 0; i < 30; i++) g.process(loud);
+    const between = new Float32Array([Math.pow(10, -40 / 20), 0, 0]);
     const out = g.process(between);
     expect(g.isOpen).toBe(true);
     expect(out[0]).toBeCloseTo(between[0], 5);
@@ -215,7 +294,7 @@ describe('createNoiseGate: boundaries, release, custom opts', () => {
     expect(g.env).toBe(0);
     expect(g.isOpen).toBe(false);
     const loud = new Float32Array([0.4, 0.4, 0.4]);
-    g.process(loud); // peak > open threshold → gate opens immediately
+    g.process(loud);
     expect(g.env).toBeGreaterThan(0);
     expect(g.isOpen).toBe(true);
     for (let i = 0; i < 30; i++) g.process(loud);

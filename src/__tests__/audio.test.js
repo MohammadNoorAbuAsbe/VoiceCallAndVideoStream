@@ -2,7 +2,7 @@
 // Tests for src/audio.js — the capture/playback pipeline.
 // Web Audio (AudioContext / AudioWorkletNode), navigator.mediaDevices, the DOM
 // <audio> element, and the heavy FastEnhancer denoiser model are all mocked so
-// the pure control-flow and PCM plumbing can be exercised deterministically.
+// the pure control-flow and Opus plumbing can be exercised deterministically.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // Mock the denoiser model loader (heavy WASM/weights) with a controllable fake.
@@ -11,6 +11,22 @@ vi.mock('../assets/fastenhancer/api/index.js', () => ({
 }));
 
 import { loadModel } from '../assets/fastenhancer/api/index.js';
+
+// Mock audio-codec.js: pass-through Opus encoder/decoder, real noise gate.
+vi.mock('../audio-codec.js', async (importOriginal) => {
+  const orig = await importOriginal();
+  return {
+    ...orig,
+    createOpusEncoder: vi.fn(() => ({
+      encode: vi.fn(async (f) => new Uint8Array(f.buffer.slice(f.byteOffset, f.byteOffset + f.byteLength))),
+      close: vi.fn(),
+    })),
+    createOpusDecoder: vi.fn(() => ({
+      decode: vi.fn(async (bytes) => new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))),
+      close: vi.fn(),
+    })),
+  };
+});
 
 // ─── Fake Web Audio ───────────────────────────────────────────────────────────
 let workletNodes = [];
@@ -72,6 +88,11 @@ function makeDenoiser() {
   };
 }
 
+// Helper: create a 960-sample Float32 frame (one full Opus frame @ 48kHz = 20ms).
+function makeFrame(fillValue = 0.5) {
+  return new Float32Array(960).fill(fillValue);
+}
+
 let audio;
 beforeEach(async () => {
   vi.resetModules();
@@ -127,7 +148,8 @@ describe('initCapture', () => {
       const captureNode = workletNodes[0];
       const onFrame = vi.fn();
       audio.setOnFrame(onFrame);
-      captureNode.port.onmessage({ data: { type: 'frame', frame: new Float32Array([0.5]) } });
+      captureNode.port.onmessage({ data: { type: 'frame', frame: makeFrame(0.5) } });
+      await new Promise(r => setTimeout(r, 0));
       expect(onFrame).toHaveBeenCalledTimes(1);
     } finally {
       globalThis.Worker = prev;
@@ -147,11 +169,11 @@ describe('capture frame processing', () => {
     const captureNode = await captureWith(true, true);
     const onFrame = vi.fn();
     audio.setOnFrame(onFrame);
-    const frame = new Float32Array([0.5, -0.5, 0.01]);
-    captureNode.port.onmessage({ data: { type: 'frame', frame } });
+    captureNode.port.onmessage({ data: { type: 'frame', frame: makeFrame(0.5) } });
+    await new Promise(r => setTimeout(r, 0));
     expect(onFrame).toHaveBeenCalledTimes(1);
     const out = onFrame.mock.calls[0][0];
-    expect(out).toBeInstanceOf(Float32Array);
+    expect(out).toBeInstanceOf(Uint8Array);
   });
 
   it('does NOT forward when muted', async () => {
@@ -159,7 +181,7 @@ describe('capture frame processing', () => {
     const onFrame = vi.fn();
     audio.setOnFrame(onFrame);
     audio.setMuted(true);
-    captureNode.port.onmessage({ data: { type: 'frame', frame: new Float32Array([0.5]) } });
+    captureNode.port.onmessage({ data: { type: 'frame', frame: makeFrame(0.5) } });
     expect(onFrame).not.toHaveBeenCalled();
   });
 
@@ -174,26 +196,35 @@ describe('capture frame processing', () => {
   it('does nothing when onFrame is not set', async () => {
     const captureNode = await captureWith(true, true);
     audio.setOnFrame(null);
-    expect(() => captureNode.port.onmessage({ data: { type: 'frame', frame: new Float32Array([0.5]) } })).not.toThrow();
+    expect(() => captureNode.port.onmessage({ data: { type: 'frame', frame: makeFrame(0.5) } })).not.toThrow();
   });
 
   it('sends the raw frame when the denoiser is unavailable', async () => {
     const captureNode = await captureWith(false, true);
     const onFrame = vi.fn();
     audio.setOnFrame(onFrame);
-    const frame = new Float32Array([0.5, 0.2]);
+    const frame = makeFrame(0.5);
     captureNode.port.onmessage({ data: { type: 'frame', frame } });
-    // denoiser null → returns the frame unchanged (no gating applied)
-    expect(onFrame.mock.calls[0][0]).toBe(frame);
+    await new Promise(r => setTimeout(r, 0));
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    // denoiser null → frame passes through gate unchanged (loud signal opens gate)
+    const out = onFrame.mock.calls[0][0];
+    expect(out).toBeInstanceOf(Uint8Array);
+    expect(new Float32Array(out.buffer)[0]).toBeCloseTo(0.5, 5);
   });
 
   it('sends the raw frame when noise cancellation is disabled', async () => {
     const captureNode = await captureWith(true, false);
     const onFrame = vi.fn();
     audio.setOnFrame(onFrame);
-    const frame = new Float32Array([0.5, 0.2]);
+    const frame = makeFrame(0.5);
     captureNode.port.onmessage({ data: { type: 'frame', frame } });
-    expect(onFrame.mock.calls[0][0]).toBe(frame);
+    await new Promise(r => setTimeout(r, 0));
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    // noise cancel off → frame passes through unchanged (no gating applied)
+    const out = onFrame.mock.calls[0][0];
+    expect(out).toBeInstanceOf(Uint8Array);
+    expect(new Float32Array(out.buffer)[0]).toBeCloseTo(0.5, 5);
   });
 
   it('falls back to the noise gate when the denoiser frame throws', async () => {
@@ -206,7 +237,8 @@ describe('capture frame processing', () => {
     const onFrame = vi.fn();
     audio.setOnFrame(onFrame);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    captureNode.port.onmessage({ data: { type: 'frame', frame: new Float32Array([0.5]) } });
+    captureNode.port.onmessage({ data: { type: 'frame', frame: makeFrame(0.5) } });
+    await new Promise(r => setTimeout(r, 0));
     warn.mockRestore();
     expect(onFrame).toHaveBeenCalledTimes(1);
   });
@@ -216,16 +248,17 @@ describe('capture settings + wire format', () => {
   it('setOnStarved stores the callback', async () => {
     const cb = vi.fn();
     audio.setOnStarved(cb);
-    // exercised via the player path; here just ensure it does not throw
     expect(() => audio.setOnStarved(cb)).not.toThrow();
   });
   it('setMuted / setNoiseCancel are callable', () => {
     expect(() => { audio.setMuted(true); audio.setNoiseCancel(false); }).not.toThrow();
   });
-  it('capture48ToWire returns an Int16-le ArrayBuffer', () => {
-    const buf = audio.capture48ToWire(new Float32Array([1, -1]));
-    expect(buf).toBeInstanceOf(ArrayBuffer);
-    expect(buf.byteLength).toBe(4);
+  it('initCapture creates an Opus encoder', async () => {
+    loadModel.mockResolvedValue({ createDenoiser: vi.fn(async () => makeDenoiser()) });
+    await audio.initCapture('mic-id', true);
+    // encoder was created (mock verifies the call)
+    const { createOpusEncoder } = await import('../audio-codec.js');
+    expect(createOpusEncoder).toHaveBeenCalled();
   });
 });
 
@@ -271,8 +304,8 @@ describe('playback', () => {
     expect(audio.isPlaybackSuspended()).toBe(false);
   });
 
-  it('playBytes is a no-op before playback is initialised', () => {
-    expect(() => audio.playBytes(new ArrayBuffer(4))).not.toThrow();
+  it('playOpusFrame is a no-op before playback is initialised', () => {
+    expect(() => audio.playOpusFrame(new Uint8Array(4))).not.toThrow();
   });
 
   it('resumePlayback swallows resume errors', async () => {
@@ -285,14 +318,16 @@ describe('playback', () => {
     warn.mockRestore();
   });
 
-  it('playBytes converts Int16 and posts to the player node', async () => {
+  it('playOpusFrame decodes and posts to the player node', async () => {
     loadModel.mockResolvedValue({ createDenoiser: vi.fn(async () => makeDenoiser()) });
     await audio.initPlayback();
     const playerNode = workletNodes[workletNodes.length - 1];
     const post = vi.spyOn(playerNode.port, 'postMessage');
-    audio.playBytes(new Float32Array([1]).buffer);
+    const opusBytes = new Uint8Array(new Float32Array([1]).buffer);
+    await audio.playOpusFrame(opusBytes);
     expect(post).toHaveBeenCalledTimes(1);
     expect(post.mock.calls[0][0]).toBeInstanceOf(Float32Array);
+    expect(post.mock.calls[0][0][0]).toBe(1);
   });
 });
 
@@ -355,9 +390,9 @@ describe('teardown', () => {
     loadModel.mockResolvedValue({ createDenoiser: vi.fn(async () => makeDenoiser()) });
     await audio.initPlayback();
     const playCtx = ctxInstances[ctxInstances.length - 1];
-    const close = vi.spyOn(playCtx, 'close');
+    playCtx.close = vi.fn(async () => {});
     await audio.closePlayback();
-    expect(close).toHaveBeenCalled();
+    expect(playCtx.close).toHaveBeenCalled();
     expect(audio.isPlaybackReady()).toBe(false);
   });
 });

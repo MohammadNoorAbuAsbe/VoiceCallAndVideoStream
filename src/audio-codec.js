@@ -1,32 +1,86 @@
 // ─────────────────────────────────────────────────────────────────────────────
-//  Audio codec + noise gate — pure, browser-free helpers.
+//  Audio codec — Opus encoder/decoder (WebCodecs) + noise gate.
 //
-//  Kept separate from audio.js so the PCM conversion and noise-gate logic can
-//  be unit-tested without the AudioContext / AudioWorklet / denoiser model.
+//  Opus compression replaces the old PCM Int16 conversion to reduce bandwidth
+//  ~20x. The encoder uses WebCodecs AudioEncoder (Chromium) and the decoder
+//  uses AudioDecoder. Both wrap the callback-based API behind a promise queue
+//  so callers can await each compressed/decompressed frame in order.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// @illusion: convert Float32 PCM array to Int16 little-endian ArrayBuffer
-export function float32ToInt16(frame) {
-  const buf = new ArrayBuffer(frame.length * 2);
-  const view = new DataView(buf);
-  for (let i = 0; i < frame.length; i++) {
-    let s = Math.max(-1, Math.min(1, frame[i]));
-    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-  }
-  return buf;
+// @illusion: create Opus encoder — wraps AudioEncoder behind a promise queue
+export function createOpusEncoder(sampleRate = 48000, bitrate = 20000) {
+  let encoder = null;
+  let timestamp = 0;
+  const outputQueue = [];
+
+  const init = async () => {
+    if (encoder) return;
+    encoder = new AudioEncoder({
+      output: (chunk) => {
+        const bytes = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(bytes);
+        if (outputQueue.length > 0) outputQueue.shift()(bytes);
+      },
+      error: (e) => console.error('[opus encoder]', e),
+    });
+    encoder.configure({ codec: 'opus', sampleRate, numberOfChannels: 1, bitrate });
+  };
+
+  return {
+    // @illusion: encode one Float32 frame (must be 960 samples @ 48kHz) — returns compressed Opus bytes
+    async encode(float32Samples) {
+      await init();
+      const ts = timestamp;
+      timestamp += Math.round(float32Samples.length / sampleRate * 1_000_000);
+      const buf = float32Samples.buffer.slice(float32Samples.byteOffset, float32Samples.byteOffset + float32Samples.byteLength);
+      const audioData = new AudioData({
+        format: 'f32-planar', sampleRate,
+        numberOfFrames: float32Samples.length, numberOfChannels: 1,
+        timestamp: ts, data: buf,
+      });
+      encoder.encode(audioData);
+      return new Promise((resolve) => { outputQueue.push(resolve); });
+    },
+    // @illusion: close the encoder and release resources
+    close() {
+      if (encoder) { try { encoder.close(); } catch {} encoder = null; }
+    },
+  };
 }
 
-// @illusion: wrap Float32 frame as Int16 LE wire bytes for relay transport
-export function frameToBytes(frame) {
-  return float32ToInt16(frame);
-}
+// @illusion: create Opus decoder — wraps AudioDecoder behind a promise queue
+export function createOpusDecoder(sampleRate = 48000) {
+  let decoder = null;
+  const outputQueue = [];
 
-// @illusion: convert Int16 LE ArrayBuffer to Float32Array for playback
-export function int16ToFloat32(arrayBuffer) {
-  const int16 = new Int16Array(arrayBuffer);
-  const f = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) f[i] = int16[i] / 0x8000;
-  return f;
+  const init = async () => {
+    if (decoder) return;
+    decoder = new AudioDecoder({
+      output: (audioData) => {
+        const len = audioData.numberOfFrames;
+        const buf = new Float32Array(len);
+        audioData.copyTo(buf, { planeIndex: 0 });
+        audioData.close();
+        if (outputQueue.length > 0) outputQueue.shift()(buf);
+      },
+      error: (e) => console.error('[opus decoder]', e),
+    });
+    decoder.configure({ codec: 'opus', sampleRate, numberOfChannels: 1 });
+  };
+
+  return {
+    // @illusion: decode one Opus packet — returns Float32Array (960 samples @ 48kHz)
+    async decode(opusBytes) {
+      await init();
+      const chunk = new EncodedAudioChunk({ type: 'key', timestamp: 0, data: opusBytes });
+      decoder.decode(chunk);
+      return new Promise((resolve) => { outputQueue.push(resolve); });
+    },
+    // @illusion: close the decoder and release resources
+    close() {
+      if (decoder) { try { decoder.close(); } catch {} decoder = null; }
+    },
+  };
 }
 
 // ─── Noise gate ───────────────────────────────────────────────────────────────
@@ -34,6 +88,7 @@ export function int16ToFloat32(arrayBuffer) {
 // levels in dBFS). While opening it ramps up by `attack` per frame; while
 // closing it fades down by `release` per frame. Returns the (possibly muted or
 // scaled) frame; when fully open it returns the input frame untouched.
+
 // @illusion: create hysteresis noise gate with peak-detect and attack/release envelope
 export function createNoiseGate(opts = {}) {
   const GATE_OPEN_DB   = opts.openDb  ?? -36;
@@ -61,8 +116,8 @@ export function createNoiseGate(opts = {}) {
         ? Math.min(1, gateEnv + GATE_ATTACK)
         : Math.max(0, gateEnv - GATE_RELEASE);
 
-      if (gateEnv >= 1) return frame;            // fully open — no copy
-      const out = new Float32Array(frame.length); // closed → zeros
+      if (gateEnv >= 1) return frame;
+      const out = new Float32Array(frame.length);
       if (gateEnv > 0) {
         for (let i = 0; i < frame.length; i++) out[i] = frame[i] * gateEnv;
       }

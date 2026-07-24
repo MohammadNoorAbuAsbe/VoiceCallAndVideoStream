@@ -67,9 +67,8 @@ vi.mock('../audio.js', () => ({
   initPlayback: vi.fn(async () => {}),
   resumePlayback: vi.fn(async () => {}),
   isPlaybackSuspended: vi.fn(() => false),
-  playBytes: vi.fn(),
+  playOpusFrame: vi.fn(async () => {}),
   setOutputDevice: vi.fn(async () => {}),
-  capture48ToWire: vi.fn((f) => f),
 }));
 
 import * as main from '../main.js';
@@ -217,17 +216,17 @@ describe('relay status + connection', () => {
     expect(document.getElementById('reconnect-overlay').classList.contains('hidden')).toBe(false);
   });
 
-  it('relay "audio" plays bytes and clears reconnecting flag', async () => {
+  it('relay "audio" plays Opus frame and clears reconnecting flag', async () => {
     const relay = setupRelay();
     await main.acceptIncomingInternal('c1', 'peer', 'Peer', false);
     main.__setActiveSession(passthroughSession());
     relay.emit('close');
-    // Incoming audio is a fixed-size batched blob (one 1052-byte frame here).
-    const blob = new Uint8Array(1052);
+    const blob = new Uint8Array(50);
     relay.emit('audio', blob);
-    await until(() => audio.playBytes.mock.calls.length >= 1);
-    expect(audio.playBytes).toHaveBeenCalledTimes(1);
-    expect(audio.playBytes.mock.calls[0][0].byteLength).toBe(1052);
+    await until(() => audio.playOpusFrame.mock.calls.length >= 1);
+    expect(audio.playOpusFrame).toHaveBeenCalledTimes(1);
+    expect(audio.playOpusFrame.mock.calls[0][0]).toBeInstanceOf(Uint8Array);
+    expect(audio.playOpusFrame.mock.calls[0][0].byteLength).toBe(50);
     expect(document.getElementById('reconnect-overlay').classList.contains('hidden')).toBe(true);
   });
 
@@ -976,7 +975,6 @@ describe('audio frame wiring (onFrame / onStarved)', () => {
     main.__setActiveSession(passthroughSession());
     const frame = new Float32Array(8);
     await frameCb(frame);
-    // frames are batched and flushed (via a short timer) as one binary blob
     await until(() => relay.callCount('audio') >= 1);
     expect(relay.lastCall('audio')).toBe(frame);
   });
@@ -985,19 +983,6 @@ describe('audio frame wiring (onFrame / onStarved)', () => {
     setupRelay();
     frameCb(new Float32Array(8));
     expect(hoist.getLastRelay().callCount('audio')).toBe(0);
-  });
-
-  it('relay "audio" splits a multi-frame blob into per-frame playbacks', async () => {
-    const relay = setupRelay();
-    await main.acceptIncomingInternal('c1', 'peer', 'Peer', false);
-    main.__setActiveSession(passthroughSession());
-    // Three fixed-size frames concatenated into one binary message.
-    relay.emit('audio', new Uint8Array(1052 * 3));
-    await until(() => audio.playBytes.mock.calls.length >= 3);
-    expect(audio.playBytes).toHaveBeenCalledTimes(3);
-    for (const call of audio.playBytes.mock.calls) {
-      expect(call[0].byteLength).toBe(1052);
-    }
   });
 
   it('onFrame drops when relay disconnected', async () => {
